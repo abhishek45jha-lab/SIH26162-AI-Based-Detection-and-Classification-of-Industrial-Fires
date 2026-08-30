@@ -11,7 +11,6 @@ import {
   shortLabel,
   fmtDistanceKm,
   fmtConfidence,
-  fmtSourceConfidence,
   fmtDateTime,
   pointCoords,
   detectionId,
