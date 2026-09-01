@@ -12,8 +12,23 @@ from typing import Any, Dict, List, Optional
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+
+try:
+    from insurance import (
+        UIIC_REFERENCE,
+        empty_policy_analysis,
+        make_profile,
+        overview_from_records,
+    )
+except ImportError:  # Supports `uvicorn backend.main:app` from the repository root.
+    from backend.insurance import (
+        UIIC_REFERENCE,
+        empty_policy_analysis,
+        make_profile,
+        overview_from_records,
+    )
 
 # ---------------------------------------------------------------------------
 # Environment & Database Configuration
@@ -51,9 +66,9 @@ def get_db_connection():
 # ---------------------------------------------------------------------------
 
 app = FastAPI(
-    title="SIH 2026 Thermal Monitoring & Flare Detection API",
-    description="Backend API serving GeoJSON map layers and statistics for satellite thermal detections.",
-    version="1.0.0",
+    title="Ageni Industrial Fire & Insurance Intelligence API",
+    description="Backend API serving existing Ageni thermal/map outputs and a separate, explainable insurance intelligence bridge.",
+    version="1.1.0",
 )
 
 # Enable CORS for local dev / all origins
@@ -95,7 +110,7 @@ def build_geojson_feature(geom_json_str: Optional[str], properties: Dict[str, An
 @app.get("/")
 def root():
     return {
-        "service": "SIH 2026 Thermal API",
+        "service": "Ageni Industrial Fire & Insurance Intelligence API",
         "status": "online",
         "endpoints": [
             "/api/thermal-points",
@@ -103,8 +118,142 @@ def root():
             "/api/industrial-zones",
             "/api/power-plants",
             "/api/stats",
+            "/api/insurance/overview",
+            "/api/insurance/uiic/products",
+            "/api/insurance/uiic/reference",
+            "/api/insurance/risk/{detection_id}",
+            "/api/insurance/policy/analyze",
         ],
     }
+
+
+# ---------------------------------------------------------------------------
+# Insurance Intelligence bridge
+# ---------------------------------------------------------------------------
+
+def _insurance_record_query(where_clause: str = "", params: Optional[List[Any]] = None) -> tuple[str, List[Any]]:
+    """Build a query over existing thermal/context data without duplicating tables."""
+    query = """
+        SELECT
+            tp.id,
+            tp.latitude,
+            tp.longitude,
+            tp.frp,
+            tp.brightness,
+            tp.confidence,
+            tp.acq_date,
+            tp.acq_time,
+            tp.classification,
+            tp.confidence_score,
+            tp.needs_review,
+            tp.dist_to_industrial_m,
+            tp.dist_to_powerplant_m,
+            tp.recurrence_count,
+            iz.name AS nearest_industrial_zone,
+            pp.name AS nearest_power_plant,
+            pp.primary_fuel,
+            pp.capacity_mw
+        FROM thermal_points AS tp
+        LEFT JOIN LATERAL (
+            SELECT name
+            FROM industrial_zones
+            WHERE tp.geom IS NOT NULL AND wkb_geometry IS NOT NULL
+            ORDER BY tp.geom <-> wkb_geometry
+            LIMIT 1
+        ) AS iz ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT name, primary_fuel, capacity_mw
+            FROM power_plants
+            WHERE tp.geom IS NOT NULL AND geom IS NOT NULL
+            ORDER BY tp.geom <-> geom
+            LIMIT 1
+        ) AS pp ON TRUE
+    """
+    query += where_clause
+    return query, list(params or [])
+
+
+def _load_insurance_records(limit: int = 250) -> List[Dict[str, Any]]:
+    query, params = _insurance_record_query(" ORDER BY tp.id DESC LIMIT %s", [limit])
+    with get_db_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(query, params)
+            return [dict(row) for row in cur.fetchall()]
+
+
+@app.get("/api/insurance/uiic/products")
+def get_uiic_products():
+    """Return official UIIC reference products; no live insurer API is implied."""
+    return {
+        "provider": UIIC_REFERENCE["provider"],
+        "products": UIIC_REFERENCE["products"],
+        "disclaimer": UIIC_REFERENCE["disclaimer"],
+    }
+
+
+@app.get("/api/insurance/uiic/reference")
+def get_uiic_reference():
+    """Return the UIIC reference-data layer used by Insurance Intelligence."""
+    return UIIC_REFERENCE
+
+
+@app.get("/api/insurance/overview")
+def get_insurance_overview(
+    limit: int = Query(250, description="Number of existing thermal detections to analyse", ge=1, le=1000),
+):
+    """Bridge existing Ageni records into an insurance-relevance overview."""
+    try:
+        return overview_from_records(_load_insurance_records(limit))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Insurance overview database error: {str(exc)}")
+
+
+@app.get("/api/insurance/risk/{detection_id}")
+def get_insurance_risk(detection_id: int):
+    """Return an explainable profile for one existing thermal detection."""
+    query, params = _insurance_record_query(" WHERE tp.id = %s", [detection_id])
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(query, params)
+                row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Ageni detection not found")
+        profile = make_profile(dict(row))
+        profile["detection_id"] = detection_id
+        return profile
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Insurance risk database error: {str(exc)}")
+
+
+@app.post("/api/insurance/policy/analyze")
+async def analyze_insurance_policy(file: UploadFile = File(...)):
+    """Acknowledge a user policy document without persisting or inventing extraction.
+
+    Text/OCR extraction is intentionally not claimed when no parser is configured.
+    The response gives the frontend a safe hand-off for a future authorised
+    document-processing service.
+    """
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="A policy document filename is required")
+    content = await file.read()
+    if len(content) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Policy document exceeds the 10 MB limit")
+    return empty_policy_analysis(file.filename, file.content_type, len(content))
+
+
+@app.get("/api/insurance/report/{report_id}")
+def get_insurance_report(report_id: str):
+    """Return a report-ready analysis payload from existing Ageni data."""
+    try:
+        report = overview_from_records(_load_insurance_records(250))
+        report["report_id"] = report_id
+        report["report_type"] = "Insurance Intelligence report"
+        return report
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Insurance report database error: {str(exc)}")
 
 
 @app.get("/api/thermal-points")
