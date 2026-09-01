@@ -133,9 +133,10 @@ export function makeInsuranceProfile(input, selectedProduct = 'iar') {
   if (number(record.dist_to_industrial_m) !== null && number(record.dist_to_industrial_m) <= 1000) recommendations.push('Verify fire-protection readiness for the nearby industrial exposure.');
   if (number(record.dist_to_powerplant_m) !== null && number(record.dist_to_powerplant_m) <= 1500) recommendations.push('Review electrical and power-infrastructure inspection evidence.');
   if (!recommendations.length) recommendations.push('Complete missing location and protection evidence before insurance review.');
+  const facility = record.facility || record.nearest_industrial_zone || (record.id ? `Detection ${record.id}` : 'Selected Ageni detection');
   return {
     detection_id: record.id,
-    facility: record.facility || record.nearest_industrial_zone || 'Selected Ageni detection',
+    facility,
     location: { latitude: record.latitude ?? null, longitude: record.longitude ?? null },
     industry: record.industry || null,
     fuel: record.primary_fuel || null,

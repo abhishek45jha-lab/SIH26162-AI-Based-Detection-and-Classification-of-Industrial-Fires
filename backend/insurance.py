@@ -249,8 +249,11 @@ def make_profile(record: Dict[str, Any], selected_product: str = "iar") -> Dict[
     if not recommendations:
         recommendations.append("Complete missing location and protection evidence before insurance review.")
 
+    facility = record.get("facility") or record.get("nearest_industrial_zone") or (
+        f"Detection {record['id']}" if record.get("id") is not None else "Selected Ageni detection"
+    )
     return {
-        "facility": record.get("facility") or record.get("nearest_industrial_zone") or "Selected Ageni detection",
+        "facility": facility,
         "location": {
             "latitude": record.get("latitude"),
             "longitude": record.get("longitude"),
