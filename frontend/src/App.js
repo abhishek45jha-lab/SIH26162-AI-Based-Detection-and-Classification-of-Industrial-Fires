@@ -9,7 +9,10 @@ import 'leaflet.markercluster/dist/MarkerCluster.Default.css';
 import { insuranceRiskIndicator, makeInsuranceProfile, operationalRisk, overviewFromPoints, UIIC_REFERENCE_FALLBACK } from './insurance';
 import './App.css';
 
-const API_BASE_URL = `${process.env.REACT_APP_API_URL || ''}/api`;
+const LIVE_FACILITY_API = 'https://sih26162-ai-based-detection-and.onrender.com';
+const API_HOST = process.env.REACT_APP_API_URL || (process.env.NODE_ENV === 'production' ? LIVE_FACILITY_API : '');
+const API_BASE_URL = `${API_HOST}/api`;
+const THERMAL_WINDOW_HOURS = Number(process.env.REACT_APP_THERMAL_WINDOW_HOURS || (process.env.NODE_ENV === 'production' ? 1000 : 120));
 
 const NAVIGATION = [
   { label: 'Dashboard', icon: 'grid', section: 'Workspace' },
@@ -174,7 +177,7 @@ function DashboardPage({ navigate, stats, dataSource, lastRefreshed }) {
   const detectionCount = stats?.total_thermal_points || 124;
   return <>
     <PageHeading eyebrow="OPERATIONS / FACILITY OVERVIEW" title="Industrial Fire Intelligence" subtitle="Know your risk before it becomes a loss." actions={<><button className="secondary-button" onClick={() => navigate('Reports')}><Icon name="download" size={15} />Export summary</button><button className="primary-button" onClick={() => navigate('Incident Center')}><Icon name="plus" size={15} />Report incident</button></>} />
-    <div className="context-strip"><span className="facility-marker" /> <strong>West Coast Manufacturing Campus</strong><span className="strip-separator" />Mumbai, Maharashtra<span className="strip-separator" />Assessment updated {lastRefreshed ? lastRefreshed.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '09:42 UTC'}<span className="strip-right">{dataSource === 'DEMO DATA' ? <span className="demo-label">DEMO DATA</span> : <span className="live-label"><span />LIVE API</span>} · {detectionCount.toLocaleString()} satellite detections in 5d</span></div>
+    <div className="context-strip"><span className="facility-marker" /> <strong>West Coast Manufacturing Campus</strong><span className="strip-separator" />Mumbai, Maharashtra<span className="strip-separator" />Assessment updated {lastRefreshed ? lastRefreshed.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '09:42 UTC'}<span className="strip-right">{dataSource === 'DEMO DATA' ? <span className="demo-label">DEMO DATA</span> : <span className="live-label"><span />LIVE API</span>} · {detectionCount.toLocaleString()} satellite detections in {dataSource === 'LIVE API' ? 'available API window' : '5d'}</span></div>
     <div className="executive-grid">
       <section className="panel hero-risk-panel">
         <div className="hero-risk-copy"><span className="panel-eyebrow">OVERALL FACILITY RISK <span className="info-inline" title="Assessment score, not a probability of fire"><Icon name="info" size={13} /></span></span><div className="hero-risk-number">72 <small>/ 100</small></div><RiskBadge score={72} label="High" /><p>Elevated assessment driven by electrical load, combustible material concentration and machinery condition.</p><button className="text-button" onClick={() => navigate('Risk Intelligence')}>View assessment <Icon name="arrow" size={14} /></button></div>
@@ -368,7 +371,7 @@ function App() {
     setLoading(true);
     setError('');
     const results = await Promise.allSettled([
-      axios.get(`${API_BASE_URL}/thermal-points?hours=120&limit=5000`),
+      axios.get(`${API_BASE_URL}/thermal-points?hours=${THERMAL_WINDOW_HOURS}&limit=5000`),
       axios.get(`${API_BASE_URL}/stats`),
       axios.get(`${API_BASE_URL}/industrial-zones`),
       axios.get(`${API_BASE_URL}/power-plants`),
