@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
 import L from 'leaflet';
 import { MapContainer, TileLayer, CircleMarker, Popup, GeoJSON } from 'react-leaflet';
@@ -6,793 +6,407 @@ import MarkerClusterGroup from 'react-leaflet-cluster';
 import 'leaflet/dist/leaflet.css';
 import 'leaflet.markercluster/dist/MarkerCluster.css';
 import 'leaflet.markercluster/dist/MarkerCluster.Default.css';
+import { insuranceRiskIndicator, makeInsuranceProfile, operationalRisk, overviewFromPoints, UIIC_REFERENCE_FALLBACK } from './insurance';
 import './App.css';
 
-// ---------------------------------------------------------------------------
-// Constants & Configuration
-// ---------------------------------------------------------------------------
-
-const API_HOST = process.env.REACT_APP_API_URL || 'http://localhost:8000';
+const LIVE_FACILITY_API = 'https://sih26162-ai-based-detection-and.onrender.com';
+const API_HOST = process.env.REACT_APP_API_URL || (process.env.NODE_ENV === 'production' ? LIVE_FACILITY_API : '');
 const API_BASE_URL = `${API_HOST}/api`;
+const THERMAL_WINDOW_HOURS = Number(process.env.REACT_APP_THERMAL_WINDOW_HOURS || (process.env.NODE_ENV === 'production' ? 1000 : 120));
+
+const NAVIGATION = [
+  { label: 'Dashboard', icon: 'grid', section: 'Workspace' },
+  { label: 'Risk Intelligence', icon: 'pulse', section: 'Workspace' },
+  { label: 'Live Monitoring', icon: 'activity', section: 'Workspace' },
+  { label: 'Risk Map', icon: 'map', section: 'Workspace' },
+  { label: 'Insurance Intelligence', icon: 'shield', section: 'Readiness' },
+  { label: 'Incident Center', icon: 'alert', section: 'Readiness' },
+  { label: 'Claims Intelligence', icon: 'file', section: 'Readiness' },
+  { label: 'Assets', icon: 'box', section: 'Governance' },
+  { label: 'Safety & Compliance', icon: 'check', section: 'Governance' },
+  { label: 'Reports', icon: 'report', section: 'Governance' },
+];
 
 const CLASSIFICATION_CONFIG = {
-  'Unplanned Industrial Fire': {
-    color: '#dc2626',
-    bgLight: 'rgba(220, 38, 38, 0.15)',
-    border: 'rgba(220, 38, 38, 0.4)',
-    label: 'Unplanned Industrial Fire',
-    shortDesc: 'High risk anomalous fire inside or adjacent to industrial zone',
-  },
-  'Persistent Industrial Source': {
-    color: '#2563eb',
-    bgLight: 'rgba(37, 99, 235, 0.15)',
-    border: 'rgba(37, 99, 235, 0.4)',
-    label: 'Persistent Industrial Source',
-    shortDesc: 'Known industrial flare or regulated thermal stack source',
-  },
-  'Wildfire / Other Biomass Burning': {
-    color: '#f97316',
-    bgLight: 'rgba(249, 115, 22, 0.15)',
-    border: 'rgba(249, 115, 22, 0.4)',
-    label: 'Wildfire / Biomass Burning',
-    shortDesc: 'Agricultural stubble burn or vegetation fire distant from plants',
-  },
+  'Unplanned Industrial Fire': { color: '#e66a3c', label: 'Industrial fire' },
+  'Persistent Industrial Source': { color: '#4b9bd8', label: 'Persistent source' },
+  'Wildfire / Other Biomass Burning': { color: '#d3a24c', label: 'Biomass burning' },
 };
 
-const DEFAULT_COLOR = '#94a3b8';
+const DEMO_POINTS = [
+  { id: 'demo-1', latitude: 19.076, longitude: 72.877, classification: 'Unplanned Industrial Fire', frp: 18.4, confidence: 'nominal' },
+  { id: 'demo-2', latitude: 19.12, longitude: 72.91, classification: 'Persistent Industrial Source', frp: 11.8, confidence: 'nominal' },
+  { id: 'demo-3', latitude: 18.98, longitude: 73.02, classification: 'Wildfire / Other Biomass Burning', frp: 7.2, confidence: 'low' },
+  { id: 'demo-4', latitude: 19.2, longitude: 72.86, classification: 'Persistent Industrial Source', frp: 9.5, confidence: 'nominal' },
+  { id: 'demo-5', latitude: 19.01, longitude: 72.83, classification: 'Unplanned Industrial Fire', frp: 15.1, confidence: 'review' },
+  { id: 'demo-6', latitude: 19.16, longitude: 73.06, classification: 'Persistent Industrial Source', frp: 6.4, confidence: 'nominal' },
+];
 
-function getCategoryColor(classification) {
-  if (!classification) return DEFAULT_COLOR;
-  const match = Object.keys(CLASSIFICATION_CONFIG).find(
-    (key) => key.toLowerCase() === classification.trim().toLowerCase()
-  );
-  if (match) return CLASSIFICATION_CONFIG[match].color;
+const FACILITY_ZONES = [
+  { id: 'production', name: 'Production', short: 'PRD', x: 9, y: 20, w: 38, h: 32, risk: 68, level: 'High', color: '#d98a45', hazards: 'Hot work, combustible stock', assets: 'Extrusion line 04, solvent bay', protection: 'Sprinklers · inspected 18d ago', anomaly: 'Temperature trend rising', action: 'Schedule thermal inspection' },
+  { id: 'furnace', name: 'Furnace', short: 'FUR', x: 52, y: 13, w: 21, h: 28, risk: 82, level: 'High', color: '#e66a3c', hazards: 'Thermal process, fuel gas', assets: 'Furnace bank A/B', protection: 'Hydrant coverage · attention', anomaly: 'High thermal load', action: 'Review fuel-gas isolation' },
+  { id: 'electrical', name: 'Electrical Room', short: 'ELC', x: 78, y: 17, w: 15, h: 27, risk: 91, level: 'Critical', color: '#d8584c', hazards: 'Overload, cable insulation', assets: 'HT panel 02, MCC-7', protection: 'Detection coverage · partial', anomaly: 'Load above baseline', action: 'Inspect distribution panel' },
+  { id: 'storage', name: 'Storage', short: 'STG', x: 11, y: 61, w: 28, h: 25, risk: 74, level: 'High', color: '#d98a45', hazards: 'Packaging, pallet density', assets: 'Raw material racks', protection: 'Sprinklers · compliant', anomaly: 'Inventory reconciliation', action: 'Reduce aisle obstruction' },
+  { id: 'chemical', name: 'Chemical Area', short: 'CHM', x: 45, y: 58, w: 24, h: 30, risk: 79, level: 'High', color: '#d98a45', hazards: 'Flammable liquids', assets: 'Tank farm 1–3', protection: 'Foam system · due review', anomaly: 'No new anomaly', action: 'Verify foam concentrate' },
+  { id: 'loading', name: 'Loading Area', short: 'LDG', x: 75, y: 56, w: 18, h: 31, risk: 43, level: 'Moderate', color: '#c9a34b', hazards: 'Vehicle movement', assets: 'Dock 2, transfer pumps', protection: 'Extinguishers · compliant', anomaly: 'Low data coverage', action: 'Add inspection evidence' },
+];
 
-  // Fallback fuzzy matches
-  const lower = classification.toLowerCase();
-  if (lower.includes('unplanned') || lower.includes('industrial fire')) return '#dc2626';
-  if (lower.includes('persistent') || lower.includes('flare') || lower.includes('stack')) return '#2563eb';
-  if (lower.includes('wildfire') || lower.includes('biomass') || lower.includes('stubble')) return '#f97316';
-  return DEFAULT_COLOR;
-}
+const FACTORS = [
+  { name: 'Electrical Load', score: 81, color: '#e66a3c', why: 'Peak demand is above the facility baseline and the latest panel inspection is outside the preferred interval.', data: 'SCADA load profile · HT panel inspection · maintenance register', contribution: '31% of assessed risk', action: 'Inspect HT panel 02 and rebalance peak loads.' },
+  { name: 'Combustible Material', score: 76, color: '#d98a45', why: 'Storage density and packaging concentration increase the available fuel load near Production.', data: 'Asset register · inventory snapshot · zone survey', contribution: '22% of assessed risk', action: 'Clear aisle obstruction and validate inventory segregation.' },
+  { name: 'Machinery', score: 68, color: '#b88551', why: 'Vibration and temperature readings on two production assets are trending above their recent baseline.', data: 'Condition sensors · maintenance history', contribution: '17% of assessed risk', action: 'Create a work order for Extrusion line 04.' },
+  { name: 'Fire Protection', score: 59, color: '#c9a34b', why: 'Protection coverage is present, but foam system review and partial detection coverage create residual exposure.', data: 'Inspection checklist · protection register · AMC records', contribution: '14% of assessed risk', action: 'Close the foam system review before the next shift.' },
+  { name: 'Human Factors', score: 48, color: '#4b9bd8', why: 'Training completion is strong, with a small number of contractor records awaiting renewal.', data: 'Training register · contractor access log', contribution: '9% of assessed risk', action: 'Renew 6 contractor permits and refresher records.' },
+  { name: 'Emergency Preparedness', score: 41, color: '#3f8f92', why: 'The emergency response plan is current, but the last full-scale drill evidence is incomplete.', data: 'ERP document · drill log · action tracker', contribution: '7% of assessed risk', action: 'Upload the latest drill minutes and close open actions.' },
+];
 
-function formatDistanceKm(meters) {
-  if (meters === null || meters === undefined || isNaN(meters)) return 'N/A';
-  const km = meters / 1000;
-  return `${km.toFixed(2)} km`;
-}
+const SENSOR_DATA = [
+  { name: 'Temperature', value: '84.2', unit: '°C', status: 'Elevated', detail: 'Furnace line · above 7d baseline', icon: 'thermometer', tone: 'orange', spark: [38, 42, 41, 47, 49, 57, 62, 70, 65, 74, 82] },
+  { name: 'Pressure', value: '7.4', unit: 'bar', status: 'Nominal', detail: 'Fuel-gas header · stable', icon: 'gauge', tone: 'blue', spark: [52, 51, 50, 52, 51, 52, 52, 51, 50, 51, 50] },
+  { name: 'Smoke', value: '0.18', unit: 'obsc.', status: 'Nominal', detail: 'Detection loop 03 · clear', icon: 'smoke', tone: 'green', spark: [23, 24, 23, 24, 22, 23, 23, 22, 23, 22, 23] },
+  { name: 'Humidity', value: '61', unit: '% RH', status: 'Nominal', detail: 'Warehouse · stable', icon: 'humidity', tone: 'blue', spark: [48, 46, 49, 47, 48, 50, 48, 49, 50, 49, 49] },
+  { name: 'Electrical Load', value: '86', unit: '%', status: 'Attention', detail: 'HT panel 02 · +12% vs baseline', icon: 'bolt', tone: 'orange', spark: [48, 52, 55, 57, 59, 63, 64, 71, 76, 82, 86] },
+  { name: 'Machine Vibration', value: '4.8', unit: 'mm/s', status: 'Attention', detail: 'Extrusion line 04 · rising', icon: 'wave', tone: 'orange', spark: [30, 31, 34, 33, 37, 39, 43, 46, 45, 48, 52] },
+];
 
-function formatDateDisplay(dateStr, timeStr) {
-  if (!dateStr) return 'N/A';
-  let formattedTime = '';
-  if (timeStr) {
-    const padded = String(timeStr).padStart(4, '0');
-    formattedTime = ` ${padded.slice(0, 2)}:${padded.slice(2, 4)} UTC`;
-  }
-  return `${dateStr}${formattedTime}`;
-}
 
-// Custom Marker Cluster Icon Generator
-const createClusterCustomIcon = (cluster) => {
-  const count = cluster.getChildCount();
-  let clusterSize = 'small';
-  if (count >= 100) {
-    clusterSize = 'large';
-  } else if (count >= 10) {
-    clusterSize = 'medium';
-  }
+const COMPLIANCE_ITEMS = [
+  { name: 'Fire extinguishers', detail: '48 of 48 units inspected', status: 'Compliant', owner: 'Safety team', due: 'Current' },
+  { name: 'Sprinkler system', detail: 'Flow test certificate on file', status: 'Compliant', owner: 'Facilities', due: 'Current' },
+  { name: 'Hydrant system', detail: 'Pump test evidence missing', status: 'Attention Required', owner: 'Facilities', due: 'Due in 9 days' },
+  { name: 'Fire alarms', detail: 'Loop 03 maintenance overdue', status: 'Attention Required', owner: 'Maintenance', due: 'Due now' },
+  { name: 'Emergency exits', detail: 'All mapped and accessible', status: 'Compliant', owner: 'Safety team', due: 'Current' },
+  { name: 'Electrical inspection', detail: 'HT panel 02 report expired', status: 'Critical', owner: 'Electrical', due: 'Overdue by 21d' },
+  { name: 'AMC status', detail: '4 of 5 contracts active', status: 'Attention Required', owner: 'Procurement', due: 'Due in 14 days' },
+  { name: 'Emergency response plan', detail: 'Version 3.2 approved', status: 'Compliant', owner: 'EHS lead', due: 'Current' },
+  { name: 'Safety training', detail: '94% workforce complete', status: 'Compliant', owner: 'HR / EHS', due: 'Current' },
+];
 
-  // Check if any child marker represents an unplanned industrial fire
-  const markers = cluster.getAllChildMarkers();
-  let hasHighRisk = false;
-  for (let i = 0; i < markers.length; i++) {
-    const opts = markers[i].options;
-    if (opts?.fillColor === '#dc2626' || opts?.pathOptions?.fillColor === '#dc2626') {
-      hasHighRisk = true;
-      break;
-    }
-  }
-
-  const formattedCount = count > 9999 ? `${(count / 1000).toFixed(1)}k` : count.toLocaleString();
-
-  return L.divIcon({
-    html: `<div class="cluster-badge cluster-${clusterSize} ${hasHighRisk ? 'cluster-has-fire' : ''}"><span>${formattedCount}</span></div>`,
-    className: 'custom-cluster-wrapper',
-    iconSize: L.point(40, 40, true),
-  });
-};
-
-// ---------------------------------------------------------------------------
-// Main Dashboard Application
-// ---------------------------------------------------------------------------
-
-function App() {
-  const [points, setPoints] = useState([]);
-  const [stats, setStats] = useState(null);
-  const [industrialZones, setIndustrialZones] = useState(null);
-  const [powerPlants, setPowerPlants] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
-  
-  // Filters & Layer Toggles - Default to 120 hours (5 Days) on initial page load
-  const [selectedHours, setSelectedHours] = useState(120);
-  const [activeCategoryFilter, setActiveCategoryFilter] = useState('ALL');
-  const [selectedPoint, setSelectedPoint] = useState(null);
-  const [showIndustrialZones, setShowIndustrialZones] = useState(false);
-  const [showPowerPlants, setShowPowerPlants] = useState(false);
-  const [lastRefreshed, setLastRefreshed] = useState(new Date());
-  const isInitialMount = useRef(true);
-
-  // Fetch thermal points & stats (refreshed when time filter changes)
-  const fetchThermalData = useCallback(async (hours = selectedHours) => {
-    try {
-      const pointsUrl = hours !== null
-        ? `${API_BASE_URL}/thermal-points?hours=${hours}&limit=5000`
-        : `${API_BASE_URL}/thermal-points?hours=0&limit=5000`;
-
-      const [pointsRes, statsRes] = await Promise.all([
-        axios.get(pointsUrl),
-        axios.get(`${API_BASE_URL}/stats`),
-      ]);
-
-      setPoints(pointsRes.data?.features || []);
-      setStats(statsRes.data || null);
-      setLastRefreshed(new Date());
-    } catch (err) {
-      console.error('Error fetching thermal points/stats:', err);
-      setError(
-        err.response?.data?.detail ||
-          `Failed to connect to FastAPI backend at ${API_HOST}. Ensure the server is running.`
-      );
-    }
-  }, [selectedHours]);
-
-  // Initial load: fetch thermal points (5 Days default), stats, industrial zones, and power plants
-  useEffect(() => {
-    let isMounted = true;
-
-    const loadInitialData = async () => {
-      setLoading(true);
-      setError(null);
-      try {
-        const initialPointsUrl = `${API_BASE_URL}/thermal-points?hours=120&limit=5000`;
-        const [pointsRes, statsRes, zonesRes, plantsRes] = await Promise.allSettled([
-          axios.get(initialPointsUrl),
-          axios.get(`${API_BASE_URL}/stats`),
-          axios.get(`${API_BASE_URL}/industrial-zones`),
-          axios.get(`${API_BASE_URL}/power-plants`),
-        ]);
-
-        if (isMounted) {
-          if (pointsRes.status === 'fulfilled') {
-            setPoints(pointsRes.value.data?.features || []);
-          }
-          if (statsRes.status === 'fulfilled') {
-            setStats(statsRes.value.data || null);
-          }
-          if (zonesRes.status === 'fulfilled') {
-            setIndustrialZones(zonesRes.value.data || null);
-          }
-          if (plantsRes.status === 'fulfilled') {
-            setPowerPlants(plantsRes.value.data?.features || []);
-          }
-          setLastRefreshed(new Date());
-        }
-      } catch (err) {
-        if (isMounted) {
-          console.error('Error in initial load:', err);
-          setError('Failed to load map data from backend.');
-        }
-      } finally {
-        if (isMounted) setLoading(false);
-      }
-    };
-
-    loadInitialData();
-    return () => {
-      isMounted = false;
-    };
-  }, []);
-
-  // Update thermal points when selectedHours changes (after initial mount)
-  useEffect(() => {
-    if (isInitialMount.current) {
-      isInitialMount.current = false;
-      return;
-    }
-    fetchThermalData(selectedHours);
-  }, [selectedHours, fetchThermalData]);
-
-  // Manual refresh handler
-  const handleManualRefresh = async () => {
-    setLoading(true);
-    await fetchThermalData();
-    setLoading(false);
+function Icon({ name, size = 17, stroke = 1.8 }) {
+  const paths = {
+    grid: <><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" /></>,
+    pulse: <><path d="M3 12h4l2-7 4 14 2-7h6" /><circle cx="3" cy="12" r="1" fill="currentColor" stroke="none" /></>,
+    activity: <><path d="M4 17V9M9 17V4M14 17v-6M19 17V7" /><path d="M2 20h20" /></>,
+    map: <><path d="m3 6 6-3 6 3 6-3v15l-6 3-6-3-6 3V6Z" /><path d="M9 3v15M15 6v15" /></>,
+    shield: <><path d="M12 3 20 6v5c0 5.2-3.4 8.7-8 10-4.6-1.3-8-4.8-8-10V6l8-3Z" /><path d="m8.5 12 2.2 2.2 4.8-5" /></>,
+    alert: <><path d="m12 3 9 17H3L12 3Z" /><path d="M12 9v4M12 16h.01" /></>,
+    file: <><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z" /><path d="M14 2v6h6M8 13h8M8 17h5" /></>,
+    box: <><path d="m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Z" /><path d="m4 7.5 8 4.5 8-4.5M12 12v9" /></>,
+    check: <><path d="M12 3 20 6v5c0 5.2-3.4 8.7-8 10-4.6-1.3-8-4.8-8-10V6l8-3Z" /><path d="m8.5 12 2.2 2.2 4.8-5" /></>,
+    report: <><path d="M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z" /><path d="M7 16v-3M12 16V8M17 16v-6" /></>,
+    settings: <><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-1.7 1.7-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.1h-2.4v-.1a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L8 17l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.6-1H6v-2.4h.8a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L8 8.6l1.7-1.7.1.1a1.7 1.7 0 0 0 1.9.3 1.7 1.7 0 0 0 1-1.6v-.1h2.4v.1a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1 1.7 1.7-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.1V14h-.1a1.7 1.7 0 0 0-1.6 1Z" /></>,
+    help: <><circle cx="12" cy="12" r="9" /><path d="M9.7 9a2.4 2.4 0 1 1 3.9 1.8c-1 .8-1.6 1.2-1.6 2.7M12 16h.01" /></>,
+    bell: <><path d="M18 9a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9ZM10 21h4" /></>,
+    search: <><circle cx="10.8" cy="10.8" r="6.8" /><path d="m16 16 5 5" /></>,
+    arrow: <><path d="M5 12h14M13 6l6 6-6 6" /></>,
+    chevron: <path d="m9 18 6-6-6-6" />,
+    info: <><circle cx="12" cy="12" r="9" /><path d="M12 11v5M12 8h.01" /></>,
+    upload: <><path d="M12 16V4M7 9l5-5 5 5M5 20h14" /></>,
+    plus: <><path d="M12 5v14M5 12h14" /></>,
+    download: <><path d="M12 4v12M7 11l5 5 5-5M5 20h14" /></>,
+    refresh: <><path d="M20 11a8 8 0 0 0-14.8-4L3 10M3 5v5h5M4 13a8 8 0 0 0 14.8 4L21 14M21 19v-5h-5" /></>,
+    close: <><path d="m6 6 12 12M18 6 6 18" /></>,
+    spark: <><path d="m12 3-1.5 6.5L4 11l6.5 1.5L12 19l1.5-6.5L20 11l-6.5-1.5L12 3Z" /><path d="m19 3-.5 2.5L16 6l2.5.5L19 9l.5-2.5L22 6l-2.5-.5L19 3Z" /></>,
+    thermometer: <><path d="M14 14.8V5a2 2 0 0 0-4 0v9.8a4 4 0 1 0 4 0Z" /><path d="M12 12V6" /></>,
+    gauge: <><path d="M4.9 19a9 9 0 1 1 14.2 0" /><path d="m12 12 4-4M5 19h14" /></>,
+    smoke: <><path d="M5 16c-2-2 0-4 0-5s-1-2 0-4M10 18c-2-2 0-4 0-5s-1-2 0-4M15 16c-2-2 0-4 0-5s-1-2 0-4M20 18c-2-2 0-4 0-5s-1-2 0-4" /></>,
+    humidity: <><path d="M12 3S6 10 6 14a6 6 0 0 0 12 0c0-4-6-11-6-11Z" /><path d="M9 15a3 3 0 0 0 3 3" /></>,
+    bolt: <path d="m13 2-9 12h7l-1 8 9-12h-7l1-8Z" />,
+    wave: <path d="M3 12c3-7 6 7 9 0s6 7 9 0" />,
+    chat: <><path d="M20 11.5a7.5 7.5 0 0 1-8 7.5 9 9 0 0 1-4-.9L4 20l1-3.2a7 7 0 1 1 15-5.3Z" /><path d="M8 11h.01M12 11h.01M16 11h.01" /></>,
   };
+  return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={stroke} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name] || paths.info}</svg>;
+}
 
-  // Filtered thermal points based on category filter
-  const filteredPoints = useMemo(() => {
-    if (activeCategoryFilter === 'ALL') return points;
-    return points.filter((feature) => {
-      const cls = feature.properties?.classification || 'Unclassified';
-      return cls.toLowerCase() === activeCategoryFilter.toLowerCase();
+function getRiskTone(score) {
+  if (score >= 85) return 'critical';
+  if (score >= 65) return 'high';
+  if (score >= 40) return 'moderate';
+  return 'low';
+}
+
+function RiskBadge({ score, label, small = false }) {
+  const tone = getRiskTone(score);
+  return <span className={`risk-badge ${tone} ${small ? 'small' : ''}`}><span className="risk-badge-dot" />{label || (tone === 'critical' ? 'Critical' : tone === 'high' ? 'High' : tone === 'moderate' ? 'Moderate' : 'Low')}</span>;
+}
+
+function Sparkline({ values, color = '#4b9bd8', height = 42 }) {
+  const max = Math.max(...values);
+  const min = Math.min(...values);
+  const points = values.map((value, index) => `${(index / (values.length - 1)) * 100},${height - 5 - ((value - min) / (max - min || 1)) * (height - 13)}`).join(' ');
+  return <svg className="sparkline" viewBox={`0 0 100 ${height}`} preserveAspectRatio="none" aria-hidden="true"><polyline points={points} fill="none" stroke={color} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" /></svg>;
+}
+
+function TrendChart({ compact = false }) {
+  const values = [61, 63, 60, 65, 64, 68, 67, 70, 69, 72, 71, 72];
+  const points = values.map((value, index) => `${(index / (values.length - 1)) * 100},${105 - value}`).join(' ');
+  return <div className={`trend-chart ${compact ? 'compact' : ''}`}>
+    {!compact && <div className="chart-y-labels"><span>90</span><span>70</span><span>50</span></div>}
+    <svg viewBox="0 0 100 110" preserveAspectRatio="none" aria-label="Risk score trend over twelve weeks">
+      <defs><linearGradient id="trendFill" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stopColor="#4b9bd8" stopOpacity=".24" /><stop offset="1" stopColor="#4b9bd8" stopOpacity="0" /></linearGradient></defs>
+      {!compact && [20, 48, 76, 104].map((y) => <line key={y} x1="0" y1={y} x2="100" y2={y} stroke="rgba(144, 170, 192, .13)" strokeDasharray="2 2" />)}
+      <polygon points={`0,110 ${points} 100,110`} fill="url(#trendFill)" />
+      <polyline points={points} fill="none" stroke="#5ba7df" strokeWidth="1.8" vectorEffect="non-scaling-stroke" />
+      <circle cx="100" cy="33" r="2.2" fill="#e66a3c" vectorEffect="non-scaling-stroke" />
+    </svg>
+    {!compact && <div className="chart-x-labels"><span>12 weeks ago</span><span>6 weeks ago</span><span>Now</span></div>}
+  </div>;
+}
+
+function ProgressBar({ value, color = '#4b9bd8' }) {
+  return <div className="progress-track"><span style={{ width: `${value}%`, background: color }} /></div>;
+}
+
+function PanelHeader({ eyebrow, title, action, onAction }) {
+  return <div className="panel-header"><div><span className="panel-eyebrow">{eyebrow}</span><h2>{title}</h2></div>{action && <button className="text-button" onClick={onAction}>{action}<Icon name="arrow" size={14} /></button>}</div>;
+}
+
+function MetricCard({ label, value, detail, icon, tone = 'blue', tooltip }) {
+  return <article className="metric-card">
+    <div className="metric-card-top"><span className={`metric-icon ${tone}`}><Icon name={icon} size={17} /></span>{tooltip && <span className="tooltip" title={tooltip}><Icon name="info" size={14} /></span>}</div>
+    <div className="metric-value">{value}</div><div className="metric-label">{label}</div><div className="metric-detail">{detail}</div>
+  </article>;
+}
+
+function StatusPill({ status }) {
+  const normalized = status.toLowerCase().replace(/\s+/g, '-');
+  return <span className={`status-pill ${normalized}`}><span />{status}</span>;
+}
+
+function DashboardPage({ navigate, stats, dataSource, lastRefreshed }) {
+  const detectionCount = stats?.total_thermal_points || 124;
+  return <>
+    <PageHeading eyebrow="OPERATIONS / FACILITY OVERVIEW" title="Industrial Fire Intelligence" subtitle="Know your risk before it becomes a loss." actions={<><button className="secondary-button" onClick={() => navigate('Reports')}><Icon name="download" size={15} />Export summary</button><button className="primary-button" onClick={() => navigate('Incident Center')}><Icon name="plus" size={15} />Report incident</button></>} />
+    <div className="context-strip"><span className="facility-marker" /> <strong>West Coast Manufacturing Campus</strong><span className="strip-separator" />Mumbai, Maharashtra<span className="strip-separator" />Assessment updated {lastRefreshed ? lastRefreshed.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '09:42 UTC'}<span className="strip-right">{dataSource === 'DEMO DATA' ? <span className="demo-label">DEMO DATA</span> : <span className="live-label"><span />LIVE API</span>} · {detectionCount.toLocaleString()} satellite detections in {dataSource === 'LIVE API' ? 'available API window' : '5d'}</span></div>
+    <div className="executive-grid">
+      <section className="panel hero-risk-panel">
+        <div className="hero-risk-copy"><span className="panel-eyebrow">OVERALL FACILITY RISK <span className="info-inline" title="Assessment score, not a probability of fire"><Icon name="info" size={13} /></span></span><div className="hero-risk-number">72 <small>/ 100</small></div><RiskBadge score={72} label="High" /><p>Elevated assessment driven by electrical load, combustible material concentration and machinery condition.</p><button className="text-button" onClick={() => navigate('Risk Intelligence')}>View assessment <Icon name="arrow" size={14} /></button></div>
+        <div className="risk-orb" aria-label="Overall risk 72 out of 100"><div className="orb-ring"><span>72</span><small>score</small></div><div className="orb-caption"><span><i className="dot orange" />Risk score</span><span><i className="dot blue" />Confidence 72%</span></div></div>
+        <div className="disclaimer-line"><Icon name="info" size={13} /> Confidence reflects confidence in this assessment based on available data, not the probability a fire will happen.</div>
+      </section>
+      <section className="panel trend-panel"><PanelHeader eyebrow="ASSESSMENT TREND · 12 WEEKS" title="Risk trajectory" action="Open analysis" onAction={() => navigate('Risk Intelligence')} /><div className="trend-summary"><strong>+8 pts</strong><span>since last quarter</span><RiskBadge score={72} label="Trending higher" small /></div><TrendChart /><div className="chart-foot"><span>Assessment confidence <strong>72%</strong></span><span>Data completeness <strong>86%</strong></span></div></section>
+      <section className="panel facility-panel"><PanelHeader eyebrow="FACILITY PULSE" title="West Coast Campus" action="Open map" onAction={() => navigate('Risk Map')} /><div className="facility-sketch"><div className="sketch-halo" /><div className="sketch-building building-a" /><div className="sketch-building building-b" /><div className="sketch-building building-c" /><div className="sketch-pin pin-a" /><div className="sketch-pin pin-b" /><div className="sketch-pin pin-c" /><div className="sketch-label label-a">Furnace</div><div className="sketch-label label-b">Electrical</div><div className="sketch-label label-c">Storage</div></div><div className="facility-foot"><span><i className="dot orange" />4 zones high</span><span><i className="dot red" />1 critical</span><span><i className="dot green" />2 monitored</span></div></section>
+    </div>
+    <div className="metric-grid"><MetricCard label="Fire Risk" value="72 / 100" detail="High · +4 this week" icon="alert" tone="orange" tooltip="Assessment of fire-related hazards from available facility data." /><MetricCard label="Electrical Risk" value="81 / 100" detail="Critical driver · panel 02" icon="bolt" tone="orange" tooltip="Load, inspection and asset condition indicators." /><MetricCard label="Asset Exposure" value="Unavailable" detail="No verified asset register connected" icon="box" tone="blue" tooltip="Ageni does not infer asset valuation from thermal detections." /><MetricCard label="Insurance Readiness" value="84%" detail="4 critical gaps open" icon="shield" tone="green" tooltip="Documentation and control evidence completeness; not a coverage opinion." /></div>
+    <div className="content-grid dashboard-lower">
+      <section className="panel wide-panel"><PanelHeader eyebrow="RISK DRIVERS" title="What is moving the score" action="Explain with factors" onAction={() => navigate('Risk Intelligence')} /><div className="factor-summary-list">{FACTORS.slice(0, 4).map((factor) => <div className="factor-summary" key={factor.name}><div className="factor-name"><span className="factor-dot" style={{ background: factor.color }} />{factor.name}</div><ProgressBar value={factor.score} color={factor.color} /><strong>{factor.score}</strong><span className="factor-note">{factor.score >= 75 ? 'Elevated' : 'Moderate'}</span></div>)}</div><div className="panel-footer-link"><button className="text-button" onClick={() => navigate('Risk Intelligence')}>See all six contributing factors <Icon name="arrow" size={14} /></button></div></section>
+      <section className="panel alerts-panel"><PanelHeader eyebrow="ATTENTION QUEUE · 04" title="Critical alerts" action="View all" onAction={() => navigate('Live Monitoring')} /><AlertItem tone="critical" title="Electrical load above baseline" meta="HT Panel 02 · 18 min ago" /><AlertItem tone="warning" title="Foam system review due" meta="Chemical Area · Today" /><AlertItem tone="warning" title="Vibration trend rising" meta="Extrusion Line 04 · 42 min ago" /><div className="panel-footer-link"><button className="text-button" onClick={() => navigate('Incident Center')}>Open response center <Icon name="arrow" size={14} /></button></div></section>
+      <section className="panel wide-panel ai-explanation"><div className="ai-mark"><Icon name="spark" size={18} /></div><div className="ai-content"><div className="panel-eyebrow">AGENI EXPLANATION · GROUNDED ASSESSMENT</div><h2>Why is facility risk high?</h2><p>Facility risk is elevated primarily because of <strong>high electrical load</strong>, <strong>combustible material concentration</strong> and <strong>elevated machinery temperature</strong>. Fire protection systems reduce the overall score, while emergency preparedness evidence remains incomplete.</p><div className="ai-meta"><span>Confidence <strong>72%</strong></span><span>Data completeness <strong>86%</strong></span><span>Last assessed <strong>09:42 UTC</strong></span></div></div><button className="icon-button" title="Open Risk Intelligence" onClick={() => navigate('Risk Intelligence')}><Icon name="arrow" size={16} /></button></section>
+      <section className="panel actions-panel"><PanelHeader eyebrow="NEXT BEST ACTIONS" title="Reduce exposure" /><ActionItem index="01" title="Inspect HT panel 02" detail="Owner · Electrical team" tone="critical" /><ActionItem index="02" title="Verify foam concentrate" detail="Owner · Facilities" tone="warning" /><ActionItem index="03" title="Close drill evidence gap" detail="Owner · EHS lead" tone="blue" /></section>
+    </div>
+  </>;
+}
+
+function AlertItem({ tone, title, meta }) { return <div className="alert-item"><span className={`alert-icon ${tone}`}><Icon name={tone === 'critical' ? 'alert' : 'info'} size={14} /></span><div><strong>{title}</strong><span>{meta}</span></div><Icon name="chevron" size={14} /></div>; }
+function ActionItem({ index, title, detail, tone }) { return <div className="action-item"><span className={`action-index ${tone}`}>{index}</span><div><strong>{title}</strong><span>{detail}</span></div><Icon name="chevron" size={14} /></div>; }
+function PageHeading({ eyebrow, title, subtitle, actions }) { return <div className="page-heading"><div><div className="page-eyebrow">{eyebrow}</div><h1>{title}</h1>{subtitle && <p>{subtitle}</p>}</div>{actions && <div className="page-actions">{actions}</div>}</div>; }
+
+function RiskIntelligencePage({ navigate }) {
+  const [selected, setSelected] = useState(null);
+  return <><PageHeading eyebrow="RISK ENGINE / EXPLAINABILITY" title="Risk Intelligence" subtitle="A transparent assessment of facility conditions, contributing factors and recommended controls." actions={<><span className="assessment-chip"><span className="live-dot" />Assessment current</span><button className="secondary-button" onClick={() => navigate('Reports')}><Icon name="download" size={15} />Export assessment</button></>} />
+    <div className="assessment-top"><section className="panel assessment-score"><div><span className="panel-eyebrow">FIRE RISK ASSESSMENT</span><div className="assessment-number">72<small>/100</small></div><RiskBadge score={72} label="High" /><p>Risk score aggregates observed conditions and control evidence across the facility. It is not a probability that a fire will occur.</p></div><div className="assessment-gauges"><Gauge label="Confidence" value="72%" /><Gauge label="Data quality" value="86%" /></div></section><section className="panel explanation-panel"><div className="ai-mark"><Icon name="spark" size={18} /></div><div><span className="panel-eyebrow">AI EXPLANATION</span><h2>Assessment rationale</h2><p>Electrical load, combustible material and machinery condition are the primary contributors. Fire protection reduces residual risk, but partial detection coverage and incomplete drill evidence limit confidence.</p><div className="explanation-tags"><span>6 factors evaluated</span><span>18 data sources</span><span>Human review recommended</span></div></div></section></div>
+    <div className="section-title-row"><div><span className="panel-eyebrow">CONTRIBUTING FACTORS</span><h2>Understand every score</h2></div><span className="muted-label">Click a factor for evidence and action</span></div>
+    <div className="factor-detail-list">{FACTORS.map((factor) => <button className={`factor-detail ${selected === factor.name ? 'expanded' : ''}`} key={factor.name} onClick={() => setSelected(selected === factor.name ? null : factor.name)} aria-expanded={selected === factor.name}><div className="factor-detail-head"><span className="factor-rank">{String(FACTORS.indexOf(factor) + 1).padStart(2, '0')}</span><span className="factor-detail-name">{factor.name}</span><div className="factor-detail-bar"><ProgressBar value={factor.score} color={factor.color} /></div><strong className="factor-score">{factor.score}</strong><RiskBadge score={factor.score} small /><Icon name="chevron" size={15} /></div>{selected === factor.name && <div className="factor-expanded"><div><span>Why this score exists</span><p>{factor.why}</p></div><div><span>Data used</span><p>{factor.data}</p></div><div><span>Risk contribution</span><p>{factor.contribution}</p></div><div className="recommended-action"><span>Recommended action</span><p><Icon name="arrow" size={13} />{factor.action}</p></div></div>}</button>)}</div>
+    <div className="disclaimer-banner"><Icon name="info" size={16} /><div><strong>Interpretation note</strong><p>Confidence represents confidence in the assessment based on available data, not the probability of a fire. Simulated readings are clearly marked where live facility data is unavailable.</p></div></div>
+  </>;
+}
+function Gauge({ label, value }) { return <div className="gauge"><div className="gauge-ring"><strong>{value}</strong></div><span>{label}</span></div>; }
+
+function LiveMonitoringPage({ dataSource, navigate }) {
+  const [simulated, setSimulated] = useState(true);
+  return <><PageHeading eyebrow="OPERATIONS / TELEMETRY" title="Live Monitoring" subtitle="Condition signals across priority zones. Use anomalies to prioritize verification — not to declare an incident." actions={<><button className={`mode-toggle ${simulated ? 'active' : ''}`} onClick={() => setSimulated(!simulated)}><span />{simulated ? 'DEMO / SIMULATION MODE' : 'LIVE SENSOR MODE'}</button><button className="primary-button" onClick={() => navigate('Incident Center')}><Icon name="alert" size={15} />Report incident</button></>} />
+    <div className="demo-banner"><span className="demo-label">DEMO DATA</span><div><strong>Simulation mode is on.</strong> Values below demonstrate the monitoring workflow and do not represent live industrial sensor telemetry.</div><button onClick={() => setSimulated(!simulated)}>{simulated ? 'Switch mode' : 'Use demo values'}</button></div>
+    <div className="monitor-summary"><div><span className="panel-eyebrow">MONITORED SIGNALS</span><strong>24 <small>/ 28 online</small></strong><span className="summary-good">3 attention signals</span></div><div><span className="panel-eyebrow">LAST INGESTION</span><strong>09:42:18 <small>UTC</small></strong><span>Source heartbeat · nominal</span></div><div><span className="panel-eyebrow">ANOMALY ENGINE</span><strong>2 <small>open anomalies</small></strong><span className="summary-warn">Requires human verification</span></div></div>
+    <div className="sensor-grid">{SENSOR_DATA.map((sensor) => <SensorCard key={sensor.name} sensor={sensor} />)}</div>
+    <div className="content-grid monitoring-lower"><section className="panel wide-panel"><PanelHeader eyebrow="ANOMALY DETECTION" title="Signals that need attention" action="Open response" onAction={() => navigate('Incident Center')} /><div className="anomaly-card critical"><div className="anomaly-top"><span className="alert-icon critical"><Icon name="alert" size={15} /></span><div><strong>Elevated electrical load + rising temperature + increased vibration</strong><span>Observed across HT Panel 02 and Extrusion Line 04 · 18 min ago</span></div><RiskBadge score={88} label="Elevated" small /></div><p>These combined signals indicate a condition worth verifying. They do not establish that a fire has started or will start.</p><div className="anomaly-actions"><button className="secondary-button">Assign inspection <Icon name="arrow" size={14} /></button><button className="text-button">View contributing data <Icon name="arrow" size={14} /></button></div></div><div className="anomaly-card warning"><div className="anomaly-top"><span className="alert-icon warning"><Icon name="info" size={15} /></span><div><strong>Fire protection evidence is incomplete</strong><span>Chemical Area · foam system review due today</span></div><RiskBadge score={59} label="Attention" small /></div></div></section><section className="panel"><PanelHeader eyebrow="TELEMETRY / 60 MIN" title="Signal overview" /><div className="telemetry-chart"><div className="telemetry-axis"><span>high</span><span>baseline</span><span>low</span></div><svg viewBox="0 0 300 110" preserveAspectRatio="none"><path d="M0 75 C20 66 25 78 42 67 S68 59 82 67 S106 46 122 59 S148 48 160 53 S190 31 205 45 S226 30 240 35 S266 16 300 24" fill="none" stroke="#e66a3c" strokeWidth="2" vectorEffect="non-scaling-stroke" /><path d="M0 78 C25 76 30 75 55 77 S95 72 120 75 S157 76 180 73 S222 75 245 71 S275 73 300 70" fill="none" stroke="#4b9bd8" strokeWidth="1.4" strokeDasharray="4 4" vectorEffect="non-scaling-stroke" /></svg></div><div className="legend-inline"><span><i className="dot orange" />Combined signal</span><span><i className="dot blue" />Baseline</span></div><div className="panel-note"><Icon name="info" size={13} />Demo trend for interface validation</div></section></div>
+  </>;
+}
+function SensorCard({ sensor }) { return <article className="panel sensor-card"><div className="sensor-head"><span className={`sensor-icon ${sensor.tone}`}><Icon name={sensor.icon} size={18} /></span><span className={`sensor-status ${sensor.tone}`}>{sensor.status}</span></div><div className="sensor-name">{sensor.name}</div><div className="sensor-reading"><strong>{sensor.value}</strong><span>{sensor.unit}</span></div><Sparkline values={sensor.spark} color={sensor.tone === 'green' ? '#55aa88' : sensor.tone === 'orange' ? '#e66a3c' : '#4b9bd8'} /><span className="sensor-detail">{sensor.detail}</span></article>; }
+
+function FacilityMapCanvas({ onSelect, riskLayer }) {
+  return <div className="facility-map-canvas" aria-label="Interactive schematic map of West Coast Manufacturing Campus">
+    <div className="facility-map-header"><span>WEST COAST CAMPUS / FACILITY SCHEMATIC</span><span><i className={`dot ${riskLayer === 'insurance' ? 'blue' : 'orange'}`} />{riskLayer === 'insurance' ? 'Insurance indicators · derived from detections' : 'Operational risk zones'} · click to inspect</span></div>
+    <div className="facility-grid-lines" />
+    <div className="facility-road road-horizontal" /><div className="facility-road road-vertical" />
+    <div className="facility-compass"><strong>N</strong><span>↑</span></div>
+    {FACILITY_ZONES.map((zone) => <button key={zone.id} className={`facility-zone ${getRiskTone(zone.risk)}`} onClick={() => onSelect(zone)} style={{ left: `${zone.x}%`, top: `${zone.y}%`, width: `${zone.w}%`, height: `${zone.h}%` }} title={`Open ${zone.name} zone details`}><span>{zone.name}</span><strong>{zone.risk}</strong><small>{zone.level}</small></button>)}
+    <div className="facility-label label-production">PROCESS FLOW / NORTH</div><div className="facility-label label-perimeter">SECURED SITE PERIMETER</div>
+    <div className="facility-map-key"><span><i className="dot red" />Critical</span><span><i className="dot orange" />High</span><span><i className="dot yellow" />Moderate</span><span><i className="dot green" />Low</span></div>
+  </div>;
+}
+
+function RiskMapPage({ navigate, points, zones, plants, dataSource, selectedPoint, setSelectedPoint }) {
+  const [showZones, setShowZones] = useState(true);
+  const [showPlants, setShowPlants] = useState(false);
+  const [mapFilter, setMapFilter] = useState('ALL');
+  const [selectedZone, setSelectedZone] = useState(null);
+  const [mapView, setMapView] = useState('facility');
+  const [riskLayer, setRiskLayer] = useState('operational');
+  const mapPoints = points.length ? points : DEMO_POINTS;
+  const filtered = mapFilter === 'ALL' ? mapPoints : mapPoints.filter((point) => (point.properties?.classification || point.classification || '').toLowerCase() === mapFilter.toLowerCase());
+  const onEachZone = useCallback((feature, layer) => { const name = feature.properties?.name || 'Industrial zone'; layer.bindPopup(`<div class="map-popup"><strong>${name}</strong><span>Industrial context layer</span><small>Verify facility-level controls with the site register.</small></div>`); }, []);
+  const clusterIcon = (cluster) => { const count = cluster.getChildCount(); return L.divIcon({ html: `<div class="map-cluster">${count > 999 ? '999+' : count}</div>`, className: 'map-cluster-wrap', iconSize: L.point(34, 34, true) }); };
+  return <><PageHeading eyebrow="SPATIAL INTELLIGENCE / FACILITY CONTEXT" title="Risk Map" subtitle="Explore mapped thermal detections, infrastructure context and facility zones." actions={<><span className="map-status"><span className="live-dot" />{dataSource === 'DEMO DATA' ? 'DEMO MAP' : 'LIVE MAP FEED'}</span><button className="secondary-button"><Icon name="download" size={15} />Export view</button></>} />
+    <div className="map-toolbar"><div className="map-risk-tabs"><span className="toolbar-label">Risk layer</span><button className={riskLayer === 'operational' ? 'active' : ''} onClick={() => setRiskLayer('operational')}>Operational risk</button><button className={riskLayer === 'insurance' ? 'active' : ''} onClick={() => { setRiskLayer('insurance'); setMapView('satellite'); }}>Insurance intelligence</button></div><div className="map-view-tabs"><span className="toolbar-label">Map view</span><button className={mapView === 'facility' ? 'active' : ''} onClick={() => setMapView('facility')}>Facility zones</button><button className={mapView === 'satellite' ? 'active' : ''} onClick={() => setMapView('satellite')}>Satellite context</button></div><div className="map-filter-group"><span className="toolbar-label">Show detections</span>{['ALL', ...Object.keys(CLASSIFICATION_CONFIG)].map((filter) => <button key={filter} className={mapFilter === filter ? 'active' : ''} onClick={() => setMapFilter(filter)}>{filter === 'ALL' ? 'All' : CLASSIFICATION_CONFIG[filter].label}</button>)}</div><div className="layer-actions"><label><input type="checkbox" checked={showZones} onChange={(e) => setShowZones(e.target.checked)} /> Industrial context</label><label><input type="checkbox" checked={showPlants} onChange={(e) => setShowPlants(e.target.checked)} /> Power plants</label></div></div>
+    <div className="map-layout"><section className="panel map-panel">{mapView === 'facility' ? <FacilityMapCanvas riskLayer={riskLayer} onSelect={(zone) => { setSelectedZone(zone); setSelectedPoint(null); }} /> : <div className="map-canvas-wrap"><MapContainer center={[20.5, 77.5]} zoom={5} scrollWheelZoom className="leaflet-map-canvas"><TileLayer attribution='&copy; OpenStreetMap contributors' url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />{showZones && zones && <GeoJSON key={`zones-${zones.features?.length || 0}`} data={zones} style={() => ({ fillColor: '#4b9bd8', fillOpacity: 0.1, color: '#4b9bd8', weight: 1 })} onEachFeature={onEachZone} />}{showPlants && plants.map((plant, index) => { const props = plant.properties || {}; const lat = props.latitude ?? plant.geometry?.coordinates?.[1]; const lng = props.longitude ?? plant.geometry?.coordinates?.[0]; return lat && lng ? <CircleMarker key={`plant-${props.id || index}`} center={[lat, lng]} radius={4} pathOptions={{ fillColor: '#d3a24c', fillOpacity: .9, color: '#f5deb0', weight: 1 }}><Popup><div className="map-popup"><strong>{props.name || 'Power plant'}</strong><span>{props.capacity_mw ? `${props.capacity_mw} MW` : 'Power infrastructure'}</span></div></Popup></CircleMarker> : null; })}<MarkerClusterGroup chunkedLoading iconCreateFunction={clusterIcon} maxClusterRadius={48} showCoverageOnHover={false}>{filtered.map((point, index) => { const props = point.properties || point; const lat = props.latitude ?? point.geometry?.coordinates?.[1]; const lng = props.longitude ?? point.geometry?.coordinates?.[0]; if (lat === undefined || lng === undefined) return null; const score = riskLayer === 'insurance' ? insuranceRiskIndicator(props) : operationalRisk(props); const color = score >= 85 ? '#d85d51' : score >= 65 ? '#e47747' : score >= 40 ? '#cba653' : '#5aaa8b'; return <CircleMarker key={props.id || index} center={[lat, lng]} radius={6} pathOptions={{ fillColor: color, fillOpacity: .9, color: '#d9e5ee', weight: 1 }} eventHandlers={{ click: () => { setSelectedPoint(props); setSelectedZone(null); } }}><Popup><div className="map-popup"><strong>{props.classification || 'Thermal detection'}</strong><span>{props.frp ? `${props.frp} MW radiative power` : 'Satellite thermal detection'}</span><span>{riskLayer === 'insurance' ? `Insurance indicator: ${insuranceRiskIndicator(props)}/100` : `Operational risk: ${operationalRisk(props)}/100`}</span><small>Classifier confidence: {props.confidence || 'unavailable'} · Verify with site evidence</small></div></Popup></CircleMarker>; })}</MarkerClusterGroup></MapContainer><div className="map-legend"><strong>MAP LEGEND</strong><span><i style={{ background: '#e66a3c' }} />Industrial fire classification</span><span><i style={{ background: '#4b9bd8' }} />Persistent industrial source</span><span><i style={{ background: '#d3a24c' }} />Biomass / other burning</span>{showZones && <span><i className="legend-square" />Industrial context</span>}</div><div className="map-demo-stamp">{dataSource === 'DEMO DATA' ? 'SIMULATED / DEMO DATA' : 'SATELLITE + FACILITY CONTEXT'}</div></div>}</section><aside className="panel zone-inspector">{selectedPoint ? <><div className="inspector-top"><div><span className="panel-eyebrow">SELECTED DETECTION</span><h2>{selectedPoint.classification || 'Thermal detection'}</h2></div><button className="icon-button" onClick={() => setSelectedPoint(null)}><Icon name="close" size={15} /></button></div><div className="selected-metrics"><div><span>Radiative power</span><strong>{selectedPoint.frp ? `${selectedPoint.frp} MW` : '—'}</strong></div><div><span>Model confidence</span><strong>{selectedPoint.confidence_score !== undefined ? `${Math.round(Number(selectedPoint.confidence_score) * (Number(selectedPoint.confidence_score) <= 1 ? 100 : 1))}%` : 'Unavailable'}</strong></div><div><span>Operational risk</span><strong>{operationalRisk(selectedPoint)} / 100</strong></div><div><span>Insurance indicator</span><strong>{insuranceRiskIndicator(selectedPoint)} / 100</strong></div><div><span>Recurrence</span><strong>{selectedPoint.recurrence_count || '0'} event(s)</strong></div><div><span>Review</span><strong>{selectedPoint.needs_review ? 'Required' : 'Recommended'}</strong></div></div><div className="inspector-callout"><Icon name="info" size={14} /><p>Model confidence, operational risk and insurance indicator are separate signals. Confirm conditions with a human inspection before escalating.</p></div><div className="inspector-actions"><button className="secondary-button" onClick={() => navigate('Insurance Intelligence', { keepSelection: true })}>Open Insurance Intelligence <Icon name="arrow" size={14} /></button><button className="text-button" onClick={() => setSelectedPoint(null)}>Clear selection</button></div></> : selectedZone ? <><div className="inspector-top"><div><span className="panel-eyebrow">FACILITY ZONE / {selectedZone.short}</span><h2>{selectedZone.name}</h2></div><button className="icon-button" onClick={() => setSelectedZone(null)}><Icon name="close" size={15} /></button></div><div className="zone-risk-readout"><strong>{selectedZone.risk}</strong><span>/ 100 · {selectedZone.level} exposure</span><RiskBadge score={selectedZone.risk} label={selectedZone.level} small /></div><div className="zone-detail-list"><div><span>Main hazards</span><strong>{selectedZone.hazards}</strong></div><div><span>Affected assets</span><strong>{selectedZone.assets}</strong></div><div><span>Fire protection</span><strong>{selectedZone.protection}</strong></div><div><span>Recent anomalies</span><strong>{selectedZone.anomaly}</strong></div><div className="recommended-zone"><span>Recommended action</span><strong><Icon name="arrow" size={13} />{selectedZone.action}</strong></div></div><button className="secondary-button full-width" onClick={() => setSelectedZone(null)}>Back to all zones</button></> : <><div className="inspector-top"><div><span className="panel-eyebrow">FACILITY ZONES</span><h2>Operational context</h2></div><span className="zone-count">6 zones</span></div><div className="zone-list">{FACILITY_ZONES.map((zone) => <button key={zone.id} onClick={() => { setSelectedZone(zone); setSelectedPoint(null); }}><span className="zone-list-dot" style={{ background: zone.color }} /><span><strong>{zone.name}</strong><small>{zone.level} exposure</small></span><b>{zone.risk}</b><Icon name="chevron" size={14} /></button>)}</div><div className="panel-note"><Icon name="info" size={13} />Select a detection or zone to inspect risk context.</div></>}</aside></div>
+  </>;
+}
+
+function InsurancePage({ navigate, points, dataSource, selectedPoint }) {
+  const [selectedProduct, setSelectedProduct] = useState('iar');
+  const [selectedIndex, setSelectedIndex] = useState(0);
+  const [policyState, setPolicyState] = useState(null);
+  const [overview, setOverview] = useState(null);
+  const [selectedProfileData, setSelectedProfileData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const sourcePoints = points.length ? points : DEMO_POINTS;
+  const localOverview = useMemo(() => overview || overviewFromPoints(sourcePoints), [overview, sourcePoints]);
+  const profiles = localOverview.top_locations || [];
+  const selectedProfile = selectedProfileData || selectedPoint || profiles[selectedIndex] || profiles[0] || makeInsuranceProfile(sourcePoints[0] || {}, selectedProduct);
+  const profile = makeInsuranceProfile(selectedProfile, selectedProduct);
+  const selectedUiicProduct = UIIC_REFERENCE_FALLBACK.products.find((item) => item.id === selectedProduct) || UIIC_REFERENCE_FALLBACK.products[1];
+  const summary = localOverview.summary || {};
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    axios.get(`${API_BASE_URL}/insurance/overview?limit=250`).then((response) => {
+      if (active && response.data?.top_locations && response.data?.summary) setOverview(response.data);
+    }).catch(() => {
+      if (active) setOverview(null);
+    }).finally(() => {
+      if (active) setLoading(false);
     });
-  }, [points, activeCategoryFilter]);
-
-  // Memoized thermal point CircleMarkers for MarkerClusterGroup to prevent rebuilds on zoom/pan
-  const renderedMarkers = useMemo(() => {
-    return filteredPoints.map((feature, idx) => {
-      const props = feature.properties || {};
-      const lat = props.latitude ?? feature.geometry?.coordinates?.[1];
-      const lng = props.longitude ?? feature.geometry?.coordinates?.[0];
-
-      if (lat === undefined || lng === undefined || isNaN(lat) || isNaN(lng)) {
-        return null;
-      }
-
-      const markerColor = getCategoryColor(props.classification);
-
-      return (
-        <CircleMarker
-          key={`thermal-${props.id || idx}`}
-          center={[lat, lng]}
-          radius={6}
-          pathOptions={{
-            fillColor: markerColor,
-            fillOpacity: 0.9,
-            color: '#ffffff',
-            weight: 1.5,
-          }}
-          eventHandlers={{
-            click: () => setSelectedPoint(props),
-          }}
-        >
-          <Popup className="thermal-popup">
-            <div className="popup-card">
-              <div
-                className="popup-header-tag"
-                style={{
-                  backgroundColor: markerColor,
-                }}
-              >
-                {props.classification || 'Thermal Detection'}
-              </div>
-
-              <div className="popup-content">
-                <div className="popup-metric-grid">
-                  <div className="popup-metric">
-                    <span className="metric-title">FRP (Radiative Power)</span>
-                    <span className="metric-data highlight">
-                      {props.frp !== undefined && props.frp !== null ? `${props.frp} MW` : 'N/A'}
-                    </span>
-                  </div>
-
-                  <div className="popup-metric">
-                    <span className="metric-title">Brightness Temp</span>
-                    <span className="metric-data">
-                      {props.brightness ? `${props.brightness} K` : 'N/A'}
-                    </span>
-                  </div>
-
-                  <div className="popup-metric">
-                    <span className="metric-title">Confidence</span>
-                    <span className="metric-data capitalize">
-                      {props.confidence || 'Nominal'}
-                    </span>
-                  </div>
-
-                  <div className="popup-metric">
-                    <span className="metric-title">Dist to Industrial Zone</span>
-                    <span className="metric-data">
-                      {formatDistanceKm(props.dist_to_industrial_m)}
-                    </span>
-                  </div>
-
-                  <div className="popup-metric">
-                    <span className="metric-title">Dist to Power Plant</span>
-                    <span className="metric-data">
-                      {formatDistanceKm(props.dist_to_powerplant_m)}
-                    </span>
-                  </div>
-
-                  <div className="popup-metric">
-                    <span className="metric-title">Recurrence Count (500m)</span>
-                    <span className="metric-data">
-                      {props.recurrence_count ?? '1'}
-                    </span>
-                  </div>
-                </div>
-
-                <div className="popup-footer-row">
-                  <div className="popup-date">
-                    📅 {formatDateDisplay(props.acq_date, props.acq_time)}
-                  </div>
-                  <div className="popup-coords">
-                    📍 {lat.toFixed(4)}, {lng.toFixed(4)}
-                  </div>
-                </div>
-              </div>
-            </div>
-          </Popup>
-        </CircleMarker>
-      );
-    });
-  }, [filteredPoints]);
-
-  // Dynamic counts for current dataset
-  const categoryCounts = useMemo(() => {
-    const counts = {
-      'Unplanned Industrial Fire': 0,
-      'Persistent Industrial Source': 0,
-      'Wildfire / Other Biomass Burning': 0,
-      Unclassified: 0,
-    };
-
-    points.forEach((pt) => {
-      const cls = pt.properties?.classification;
-      if (cls && counts[cls] !== undefined) {
-        counts[cls] += 1;
-      } else {
-        counts.Unclassified += 1;
-      }
-    });
-
-    return counts;
+    return () => { active = false; };
   }, [points]);
 
-  // Industrial Zone Popup & Styling Handler
-  const onEachIndustrialZone = useCallback((feature, layer) => {
-    const props = feature.properties || {};
-    const name = props.name || 'Industrial Zone';
-    const landuse = props.landuse || 'industrial';
-    const manMade = props.man_made || 'N/A';
+  useEffect(() => {
+    let active = true;
+    setSelectedProfileData(null);
+    if (!selectedPoint?.id) return undefined;
+    axios.get(`${API_BASE_URL}/insurance/risk/${selectedPoint.id}`).then((response) => {
+      if (active && response.data) setSelectedProfileData(response.data);
+    }).catch(() => {
+      // The client-side bridge still renders the selected existing Ageni record.
+    });
+    return () => { active = false; };
+  }, [selectedPoint]);
 
-    const popupHtml = `
-      <div class="popup-card">
-        <div class="popup-header-tag" style="background-color: #8b5cf6;">
-          🏭 Industrial Zone
-        </div>
-        <div class="popup-content">
-          <div style="font-weight: 700; font-size: 0.95rem; margin-bottom: 8px; color: #ffffff;">
-            ${name}
-          </div>
-          <div class="popup-metric-grid">
-            <div class="popup-metric">
-              <span class="metric-title">Land Use</span>
-              <span class="metric-data" style="text-transform: capitalize;">${landuse}</span>
-            </div>
-            <div class="popup-metric">
-              <span class="metric-title">Man Made</span>
-              <span class="metric-data" style="text-transform: capitalize;">${manMade}</span>
-            </div>
-          </div>
-        </div>
-      </div>
-    `;
-    layer.bindPopup(popupHtml, { className: 'thermal-popup' });
+  const handlePolicyUpload = async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setPolicyState({ name: file.name, status: 'Uploading…', result: null });
+    const formData = new FormData();
+    formData.append('file', file);
+    try {
+      const response = await axios.post(`${API_BASE_URL}/insurance/policy/analyze`, formData, { headers: { 'Content-Type': 'multipart/form-data' } });
+      setPolicyState({ name: file.name, status: 'Received for review', result: response.data });
+    } catch (error) {
+      setPolicyState({ name: file.name, status: 'Demo upload recorded', result: { review_items: ['Live policy extraction is not configured in this deployment.', 'No document was persisted by the frontend.', 'Verify policy details against the actual wording.'] } });
+    }
+  };
+
+  const indicatorDisplay = profile.insurance_risk_indicator !== undefined ? `${profile.insurance_risk_indicator} / 100` : 'Unavailable';
+  const highRiskDisplay = summary.high_risk_locations !== undefined ? summary.high_risk_locations : 'Unavailable';
+  const reviewDisplay = summary.locations_requiring_review !== undefined ? summary.locations_requiring_review : 'Unavailable';
+  const completenessDisplay = summary.data_completeness !== undefined ? `${summary.data_completeness}%` : 'Unavailable';
+  const distance = (meters) => meters === null || meters === undefined ? 'Unavailable' : `${(Number(meters) / 1000).toFixed(2)} km`;
+  const location = profile.location?.latitude !== null && profile.location?.latitude !== undefined ? `${Number(profile.location.latitude).toFixed(4)}, ${Number(profile.location.longitude).toFixed(4)}` : 'Location unavailable';
+
+  return <><PageHeading eyebrow="INSURANCE INTELLIGENCE / AGENI RISK BRIDGE" title="Insurance Intelligence" subtitle="Connect Ageni operational evidence with UIIC reference information — without turning an indicator into a coverage decision." actions={<><button className="secondary-button" onClick={() => document.getElementById('policy-upload')?.click()}><Icon name="upload" size={15} />Upload policy</button><button className="primary-button" onClick={() => navigate('Reports')}><Icon name="report" size={15} />Insurance report</button></>} />
+    <div className="insurance-connector"><div className="connector-provider"><span className="uiic-mark">U</span><div><strong>UIIC</strong><span>United India Insurance Company Limited</span></div></div><div className="connector-status"><span>CONNECTION</span><strong><i />REFERENCE DATA</strong></div><div className="connector-status"><span>LIVE API</span><strong className="not-connected">NOT CONNECTED</strong></div><div className="connector-copy">Official product references only. No insurer response, premium or claim outcome is inferred.</div></div><div className="insurance-bridge"><span><b>01</b> Ageni operational signals</span><Icon name="arrow" size={13} /><span><b>02</b> Industrial / power context</span><Icon name="arrow" size={13} /><span><b>03</b> UIIC reference match</span><Icon name="arrow" size={13} /><strong>Insurance intelligence</strong></div>
+    <div className="insurance-kpis"><InsuranceKpi label="Insurance Risk Indicator" value={indicatorDisplay} detail="Ageni analytical indicator · not underwriting" tone="orange" tooltip="Derived from existing Ageni risk/context fields. It is not an official UIIC score." /><InsuranceKpi label="High-Risk Locations" value={highRiskDisplay} detail="Indicator ≥ 65 · existing detections" tone="orange" /><InsuranceKpi label="Locations Requiring Review" value={reviewDisplay} detail="Indicator ≥ 75 · human review" tone="amber" /><InsuranceKpi label="Data Completeness" value={completenessDisplay} detail={loading ? 'Loading API bridge…' : dataSource === 'DEMO DATA' ? 'Demo detection context' : 'Existing Ageni inputs'} tone="blue" /></div>
+    <div className="insurance-main-grid"><section className="panel insurance-profile-panel"><div className="panel-header"><div><span className="panel-eyebrow">INSURANCE RISK PROFILE</span><h2>{profile.facility}</h2><span className="profile-location"><Icon name="map" size={12} />{location}</span></div><span className="demo-label">{dataSource === 'DEMO DATA' ? 'DEMO DATA' : 'AGENI DATA'}</span></div><div className="profile-score-row"><div><span className="panel-eyebrow">AGENI INSURANCE RISK INDICATOR</span><div className="profile-score">{profile.insurance_risk_indicator}<small>/100</small></div><RiskBadge score={profile.insurance_risk_indicator} label={profile.insurance_risk_label} /></div><div className="profile-score-meta"><div><span>Operational risk</span><strong>{profile.operational_risk} / 100</strong></div><div><span>Model confidence</span><strong>{profile.model_confidence === null ? 'Unavailable' : `${profile.model_confidence}%`}</strong></div><div><span>Data completeness</span><strong>{profile.data_completeness}%</strong></div></div></div><div className="profile-fact-grid"><ProfileFact label="Thermal activity" value={profile.thermal_activity} tone={profile.thermal_activity === 'High' ? 'orange' : 'blue'} /><ProfileFact label="FRP / radiative power" value={profile.frp === null ? 'Unavailable' : `${profile.frp} MW`} /><ProfileFact label="Industrial proximity" value={distance(profile.industrial_proximity_m)} /><ProfileFact label="Power infrastructure" value={distance(profile.power_infrastructure_proximity_m)} /><ProfileFact label="Recurrence" value={profile.recurrence_count === null ? 'Unavailable' : `${profile.recurrence_count} event(s)`} /><ProfileFact label="Asset valuation" value="Unavailable" muted /></div><div className="profile-section"><span className="panel-eyebrow">WHY AM I SEEING THIS?</span><div className="insurance-factors">{profile.why_this_is_high.map((factor) => <span key={factor}><i className="dot orange" />{factor}</span>)}</div><p className="profile-relevance">{profile.insurance_relevance}</p></div><div className="profile-section split-section"><div><span className="panel-eyebrow">MISSING FROM AVAILABLE DATA</span>{profile.missing_data.length ? <div className="missing-list">{profile.missing_data.map((item) => <span key={item}><Icon name="alert" size={12} />{item}</span>)}</div> : <p className="profile-relevance">No missing Ageni fields for this record.</p>}</div><div><span className="panel-eyebrow">LOCATION CONTEXT</span><div className="context-values"><span>Nearest industrial zone <strong>{profile.nearest_industrial_zone || 'Unavailable'}</strong></span><span>Nearest power plant <strong>{profile.nearest_power_plant || 'Unavailable'}</strong></span><span>Fuel / capacity <strong>{profile.primary_fuel || 'Unavailable'}{profile.capacity_mw ? ` · ${profile.capacity_mw} MW` : ''}</strong></span></div></div></div><div className="ai-disclaimer"><Icon name="info" size={14} /><span>Model confidence is classifier confidence. Operational risk is Ageni risk context. Insurance Risk Indicator is a separate analytical signal — none is a probability of fire, premium or claim outcome.</span></div></section>
+      <section className="panel uiic-reference-panel"><div className="panel-header"><div><span className="panel-eyebrow">UIIC REFERENCE CENTER</span><h2>Product information</h2></div><span className="reference-badge"><i />Official source</span></div><div className="product-tabs">{UIIC_REFERENCE_FALLBACK.products.map((product) => <button key={product.id} className={selectedProduct === product.id ? 'active' : ''} onClick={() => setSelectedProduct(product.id)}>{product.name}</button>)}</div><div className="selected-product"><span className="panel-eyebrow">SELECTED PRODUCT</span><h3>{selectedUiicProduct.name}</h3><p>{selectedUiicProduct.reference_summary}</p><a className="secondary-button" href={selectedUiicProduct.official_source} target="_blank" rel="noreferrer">View official source <Icon name="arrow" size={14} /></a></div><ReferenceList title="Relevant information" items={selectedUiicProduct.relevant_information} /><ReferenceList title="Information to prepare" items={selectedUiicProduct.required_information} /><div className="risk-distribution"><span className="panel-eyebrow">RISK DISTRIBUTION · EXISTING AGENI RECORDS</span>{Object.entries(localOverview.risk_distribution || {}).map(([label, count]) => <div key={label}><span>{label}<b>{count}</b></span><ProgressBar value={profiles.length ? count / profiles.length * 100 : 0} color={label === 'Critical' ? '#d85d51' : label === 'High' ? '#e47747' : label === 'Moderate' ? '#cba653' : '#5aaa8b'} /></div>)}</div><div className="reference-disclaimer"><Icon name="shield" size={14} /><span>Reference information only. Coverage, exclusions, limits, deductibles and conditions must be verified against the actual policy wording.</span></div></section></div>
+    <div className="insurance-bottom-grid"><section className="panel location-ranking"><PanelHeader eyebrow="TOP HIGH-RISK FACILITIES" title="Ageni detections by insurance indicator" action="Open Risk Map" onAction={() => navigate('Risk Map')} /><div className="insurance-table"><div className="insurance-table-row insurance-table-head"><span>Facility / location</span><span>Operational</span><span>Insurance</span><span>Thermal / recurrence</span><span>Review</span></div>{profiles.length ? profiles.slice(0, 6).map((item, index) => <button className={`insurance-table-row ${selectedIndex === index ? 'selected' : ''}`} key={`${item.detection_id || index}-${item.location?.latitude}`} onClick={() => setSelectedIndex(index)}><span><strong>{item.facility}</strong><small>{item.location?.latitude !== null && item.location?.latitude !== undefined ? `${Number(item.location.latitude).toFixed(3)}, ${Number(item.location.longitude).toFixed(3)}` : 'Location unavailable'}</small></span><strong>{item.operational_risk}</strong><strong className={item.insurance_risk_indicator >= 75 ? 'risk-text' : ''}>{item.insurance_risk_indicator}</strong><span>{item.frp === null ? 'FRP unavailable' : `${item.frp} MW`} · {item.recurrence_count === null ? 'recurrence unavailable' : `${item.recurrence_count} repeat`}</span><StatusPill status={item.insurance_risk_indicator >= 75 ? 'Needs review' : 'Monitor'} /></button>) : <div className="insurance-empty">No existing Ageni detections are available for insurance ranking.</div>}</div></section><section className="panel policy-panel"><div className="panel-header"><div><span className="panel-eyebrow">OPTIONAL / USER-PROVIDED</span><h2>Policy / risk review</h2></div><span className="protected-label"><Icon name="shield" size={12} />Protected workflow</span></div><input id="policy-upload" type="file" hidden accept=".pdf,.doc,.docx" onChange={handlePolicyUpload} /><label className="policy-dropzone" htmlFor="policy-upload"><Icon name="upload" size={18} /><strong>{policyState ? policyState.name : 'Upload a UIIC policy document'}</strong><span>{policyState ? policyState.status : 'PDF, DOC or DOCX · analysis stays reviewable'}</span></label>{policyState?.result ? <div className="policy-result"><span className="panel-eyebrow">POLICY / RISK REVIEW</span><div className="review-checks"><span><i>✓</i>Location and industrial context · {location}</span><span><i>✓</i>Fire-risk indicators · operational {profile.operational_risk}/100</span><span><i>!</i>Asset valuation — user verification</span><span><i>!</i>Fire protection details — user verification</span><span><i>!</i>Policy-specific conditions — actual wording</span></div></div> : <div className="policy-placeholder"><Icon name="info" size={14} /><p>Upload is optional. Ageni will not declare coverage or claim eligibility, and asset values remain unavailable unless supplied by the user.</p></div>}</section><section className="panel data-sources-panel"><PanelHeader eyebrow="TRANSPARENCY" title="Data sources" /><div className="source-list">{(profile.data_sources || []).map((source) => <span key={source}><i className="dot blue" />{source}</span>)}</div><div className="source-flow"><span>AGENI RISK DATA</span><Icon name="arrow" size={13} /><span>UIIC REFERENCE</span><Icon name="arrow" size={13} /><strong>INSURANCE INSIGHT</strong></div><div className="insurance-recommendations"><span className="panel-eyebrow">RECOMMENDATIONS CONNECTED TO THIS RECORD</span>{profile.recommendations.map((recommendation, index) => <span key={recommendation}><b>{String(index + 1).padStart(2, '0')}</b>{recommendation}</span>)}</div></section></div>
+    <div className="disclaimer-banner"><Icon name="info" size={16} /><div><strong>What this module does — and does not do</strong><p>It connects existing Ageni operational/context signals with UIIC reference information to surface risk considerations and documentation needs. It does not predict UIIC premiums, claim approval or coverage, and it never replaces the actual policy wording.</p></div></div>
+  </>;
+}
+function InsuranceKpi({ label, value, detail, tone, tooltip }) { return <article className="insurance-kpi"><span className={`metric-icon ${tone}`}><Icon name={tone === 'orange' ? 'alert' : tone === 'amber' ? 'file' : 'activity'} size={17} /></span><div className="insurance-kpi-value">{value}</div><strong>{label}</strong><span>{detail}</span>{tooltip && <small title={tooltip}><Icon name="info" size={12} />Why?</small>}</article>; }
+function ProfileFact({ label, value, tone, muted }) { return <div className="profile-fact"><span>{label}</span><strong className={`${tone || ''} ${muted ? 'muted-value' : ''}`}>{value}</strong></div>; }
+function ReferenceList({ title, items }) { return <div className="reference-list"><span className="panel-eyebrow">{title}</span>{items.map((item) => <div key={item}><i>•</i><span>{item}</span></div>)}</div>; }
+
+function IncidentPage({ onReport }) {
+  return <><PageHeading eyebrow="RESPONSE / HUMAN-IN-THE-LOOP" title="Incident Center" subtitle="Capture facts, preserve evidence and route every decision for human verification." actions={<button className="primary-button report-button" onClick={onReport}><Icon name="alert" size={16} />Report incident</button>} /><div className="incident-banner"><div className="emergency-mark"><Icon name="alert" size={20} /></div><div><span className="panel-eyebrow">EMERGENCY ACTION</span><h2>If there is immediate danger, follow site emergency procedures first.</h2><p>Ageni supports documentation and intelligence workflows. It does not replace emergency response services.</p></div><button className="secondary-button" onClick={onReport}>Start record <Icon name="arrow" size={14} /></button></div><div className="section-title-row"><div><span className="panel-eyebrow">INCIDENT WORKFLOW</span><h2>From report to verified record</h2></div><span className="muted-label">Evidence remains protected by role access</span></div><div className="workflow-grid">{[['01', 'Incident details', 'Capture location, time and observations', 'check'], ['02', 'Upload evidence', 'Photos, videos, reports and records', 'upload'], ['03', 'AI evidence analysis', 'Find gaps and organize facts', 'spark'], ['04', 'Damage assessment', 'Assets, inventory and invoices', 'box'], ['05', 'Evidence completeness', 'Trace missing documentation', 'file'], ['06', 'Human verification', 'Assign reviewer and sign off', 'shield'], ['07', 'Generate report', 'Share a structured incident record', 'report']].map(([number, title, detail, icon]) => <div className="workflow-step" key={number}><span className="workflow-number">{number}</span><span className="workflow-icon"><Icon name={icon} size={17} /></span><strong>{title}</strong><p>{detail}</p>{number !== '07' && <Icon name="arrow" size={14} />}</div>)}</div><div className="content-grid incident-lower"><section className="panel"><PanelHeader eyebrow="RECENT RECORDS" title="Incident register" action="Claims workspace" /><div className="incident-table"><div className="table-row table-head"><span>Incident</span><span>Location</span><span>Evidence</span><span>Status</span></div><div className="table-row"><div><strong>INC-240518-07</strong><small>Electrical anomaly review</small></div><span>Electrical Room</span><span>4 / 6 files</span><StatusPill status="Needs review" /></div><div className="table-row"><div><strong>INC-240502-02</strong><small>Thermal detection triage</small></div><span>Furnace</span><span>Complete</span><StatusPill status="Verified" /></div></div></section><section className="panel"><PanelHeader eyebrow="PROTECTED EVIDENCE" title="Accepted file types" /><div className="file-type-grid">{[['Photographs', 'JPG · PNG'], ['Videos', 'MP4 · MOV'], ['Reports', 'PDF'], ['Records', 'XLS · CSV'], ['Invoices', 'PDF · JPG'], ['Asset documents', 'PDF · DOCX']].map(([title, detail]) => <div key={title}><span className="file-type-icon"><Icon name="file" size={15} /></span><strong>{title}</strong><small>{detail}</small></div>)}</div><div className="panel-note"><Icon name="shield" size={13} />Evidence access is role-restricted and every analysis requires human verification.</div></section></div></>;
+}
+
+function ClaimsPage({ navigate, selectedPoint }) {
+  const selectedInsuranceProfile = selectedPoint ? makeInsuranceProfile(selectedPoint) : null;
+  const evidence = [['Fire brigade report', 'Verified', 'check'], ['Site photographs', 'Verified', 'check'], ['Asset register', 'Verified', 'check'], ['Purchase invoices', 'Verified', 'check'], ['Maintenance records', 'Missing', 'alert'], ['Inventory reconciliation', 'Required', 'alert']];
+  return <><PageHeading eyebrow="CLAIMS / EVIDENCE INTELLIGENCE" title="Claims Intelligence" subtitle="Organize evidence and surface documentation gaps before human review." actions={<><button className="secondary-button" onClick={() => navigate('Incident Center')}><Icon name="upload" size={15} />Add evidence</button><button className="primary-button" onClick={() => navigate('Reports')}><Icon name="report" size={15} />Generate report</button></>} /><div className="claim-header panel"><div><span className="panel-eyebrow">{selectedInsuranceProfile ? 'AGENI DETECTION · INSURANCE EVIDENCE PREPARATION' : 'INCIDENT ID · OPEN REVIEW'}</span><h2>{selectedInsuranceProfile ? `Detection ${selectedInsuranceProfile.detection_id || 'selected'}` : 'INC-240518-07'} <span className="review-pill">Human verification required</span></h2><p>{selectedInsuranceProfile ? `${selectedInsuranceProfile.classification || 'Thermal event'} · ${selectedInsuranceProfile.location.latitude !== null ? `${Number(selectedInsuranceProfile.location.latitude).toFixed(4)}, ${Number(selectedInsuranceProfile.location.longitude).toFixed(4)}` : 'Location unavailable'}` : 'Electrical anomaly review · West Coast Manufacturing Campus · 18 May 2024, 14:20 UTC'}</p></div><div className="claim-header-meta"><div><span>Estimated damage</span><strong>Unavailable</strong></div><div><span>Model confidence</span><strong>{selectedInsuranceProfile?.model_confidence === null || selectedInsuranceProfile?.model_confidence === undefined ? 'Unavailable' : `${selectedInsuranceProfile.model_confidence}%`}</strong></div><div><span>Operational risk</span><strong>{selectedInsuranceProfile ? `${selectedInsuranceProfile.operational_risk}/100` : 'Unavailable'}</strong></div></div></div><div className="claims-grid"><section className="panel origin-panel"><span className="panel-eyebrow">EXISTING AGENI SIGNAL</span><h2>Detection context</h2><div className="origin-value"><span className="origin-icon"><Icon name="bolt" size={20} /></span><strong>{selectedInsuranceProfile?.classification || 'No detection selected'}</strong></div><p>Use this record to prepare potentially relevant evidence. Ageni does not determine cause, coverage or claim outcome.</p><div className="confidence-row"><span>Model confidence</span><strong>{selectedInsuranceProfile?.model_confidence === null || selectedInsuranceProfile?.model_confidence === undefined ? 'Unavailable' : `${selectedInsuranceProfile.model_confidence}%`}</strong><ProgressBar value={selectedInsuranceProfile?.model_confidence || 0} color="#4b9bd8" /></div></section><section className="panel evidence-panel"><PanelHeader eyebrow="POTENTIALLY RELEVANT EVIDENCE" title="What to prepare" action="Upload missing" onAction={() => navigate('Incident Center')} /><div className="evidence-list">{evidence.map(([title, status, icon]) => <div key={title} className={`evidence-row ${status === 'Verified' ? 'verified' : 'missing'}`}><span className="evidence-check"><Icon name={icon} size={14} /></span><div><strong>{title}</strong><small>{status === 'Verified' ? 'Available in protected workspace' : status === 'Missing' ? 'Potential documentation gap' : 'Requires human verification'}</small></div><span className="evidence-status">{status}</span></div>)}</div></section><section className="panel consideration-panel"><span className="panel-eyebrow">REVIEW NOTES</span><h2>Potential policy considerations</h2><div className="consideration"><Icon name="info" size={14} /><p>Electrical inspection evidence is not present in the current record. Verify policy conditions and actual wording before drawing conclusions.</p></div><div className="consideration"><Icon name="info" size={14} /><p>Inventory reconciliation is required before a damage estimate can be supported.</p></div><div className="ai-disclaimer"><Icon name="shield" size={14} />No claim outcome is predicted. Requires human verification.</div></section></div></>;
+}
+
+function AssetsPage({ navigate, points, dataSource }) {
+  const detectionCount = points.length || 'Unavailable';
+  return <><PageHeading eyebrow="ASSET REGISTER / EXPOSURE" title="Asset Intelligence" subtitle="Use verified facility records alongside Ageni detections — never infer asset value from thermal data." actions={<><button className="secondary-button" onClick={() => navigate('Insurance Intelligence')}><Icon name="shield" size={15} />Insurance context</button><button className="primary-button" onClick={() => navigate('Incident Center')}><Icon name="upload" size={15} />Add asset evidence</button></>} /><div className="asset-summary"><div><span className="panel-eyebrow">THERMAL RECORDS</span><strong>{detectionCount}</strong><span>{dataSource === 'DEMO DATA' ? 'Demo detections in context' : 'Existing Ageni records loaded'}</span></div><div><span className="panel-eyebrow">ASSET VALUATION</span><strong>Unavailable</strong><span>Not stored in current Ageni schema</span></div><div><span className="panel-eyebrow">MAINTENANCE STATUS</span><strong>Unavailable</strong><span>Connect an authorised asset register</span></div><div><span className="panel-eyebrow">INSPECTION PRIORITY</span><strong>Risk signals</strong><span>Use Risk Intelligence to triage</span></div></div><section className="panel asset-readiness-panel"><div className="asset-readiness-copy"><div className="asset-empty-icon"><Icon name="box" size={20} /></div><div><span className="panel-eyebrow">ASSET REGISTER CONNECTION</span><h2>No verified asset register is connected</h2><p>Ageni currently has thermal detections, industrial-zone context and power-plant context. It does not contain insured asset values, age, maintenance status or inspection dates, so those fields remain unavailable.</p><div className="asset-actions"><button className="primary-button" onClick={() => navigate('Incident Center')}>Upload asset evidence <Icon name="arrow" size={14} /></button><button className="secondary-button" onClick={() => navigate('Risk Map')}>Open facility context <Icon name="map" size={14} /></button></div></div></div><div className="asset-available-fields"><span className="panel-eyebrow">AVAILABLE FROM EXISTING AGENI</span><div><span><i className="dot blue" />Location</span><span><i className="dot blue" />Classification</span><span><i className="dot blue" />FRP / brightness</span><span><i className="dot blue" />Recurrence</span><span><i className="dot blue" />Infrastructure proximity</span></div></div></section><section className="panel asset-matrix-empty"><PanelHeader eyebrow="ASSET-RISK MATRIX" title="Waiting for verified asset records" /><div className="empty-matrix"><div className="matrix-placeholder"><span className="matrix-axis-y">ASSET VALUE ↑</span><span className="matrix-axis-x">RISK SCORE →</span><Icon name="box" size={22} /></div><p>Asset value and ownership data are not available in the current Ageni database. Add authorised records before plotting financial exposure.</p></div></section><div className="disclaimer-banner"><Icon name="info" size={16} /><div><strong>No inferred financial exposure</strong><p>Thermal detections can prioritize review but do not establish asset value, damage amount or business-interruption exposure.</p></div></div></>;
+}
+
+function CompliancePage() { const [filter, setFilter] = useState('All'); const items = filter === 'All' ? COMPLIANCE_ITEMS : COMPLIANCE_ITEMS.filter((item) => item.status === filter); return <><PageHeading eyebrow="GOVERNANCE / CONTROL EVIDENCE" title="Safety & Compliance" subtitle="Keep critical fire controls, documents and expiry reminders visible to the people who own them." actions={<><button className="secondary-button"><Icon name="upload" size={15} />Upload document</button><button className="primary-button"><Icon name="check" size={15} />Run checklist</button></>} /><div className="compliance-top"><section className="panel compliance-score"><div><span className="panel-eyebrow">SAFETY SCORE</span><div className="compliance-number">82<small>%</small></div><p>9 controls assessed · 4 items need attention</p></div><div className="score-bars"><div><span>Control evidence</span><strong>88%</strong><ProgressBar value={88} color="#55aa88" /></div><div><span>Document freshness</span><strong>73%</strong><ProgressBar value={73} color="#c9a34b" /></div></div></section><section className="panel expiry-panel"><PanelHeader eyebrow="UPCOMING EXPIRY" title="Keep documents current" action="View register" /><div className="expiry-item"><span className="date-tile">09<br /><small>JUN</small></span><div><strong>Hydrant pump test certificate</strong><span>Facilities · expires in 9 days</span></div><RiskBadge score={59} label="Attention" small /></div><div className="expiry-item"><span className="date-tile">14<br /><small>JUN</small></span><div><strong>Contractor safety training</strong><span>HR / EHS · expires in 14 days</span></div><RiskBadge score={48} label="Plan" small /></div></section></div><div className="filter-tabs">{['All', 'Compliant', 'Attention Required', 'Critical'].map((tab) => <button key={tab} className={filter === tab ? 'active' : ''} onClick={() => setFilter(tab)}>{tab}<span>{tab === 'All' ? COMPLIANCE_ITEMS.length : COMPLIANCE_ITEMS.filter((item) => item.status === tab).length}</span></button>)}</div><section className="panel compliance-table-panel"><div className="data-table compliance-table"><div className="table-row table-head"><span>Control / document</span><span>Evidence</span><span>Owner</span><span>Due / expiry</span><span>Status</span><span /></div>{items.map((item) => <div className="table-row" key={item.name}><div><strong>{item.name}</strong><small>{item.detail}</small></div><span>{item.detail}</span><span>{item.owner}</span><span className={item.due.includes('Overdue') || item.due === 'Due now' ? 'warning-text' : ''}>{item.due}</span><StatusPill status={item.status} /><button className="row-action" title="Open evidence"><Icon name="chevron" size={14} /></button></div>)}</div></section><div className="disclaimer-banner"><Icon name="info" size={16} /><div><strong>Evidence reminder</strong><p>A compliant status reflects the evidence currently uploaded to Ageni. Confirm on-site conditions and keep source documents authoritative.</p></div></div></>;
+}
+
+function ReportsPage({ onGenerate, generated }) { const reports = [['Facility Risk Report', 'Executive summary · risk score · factors · actions', 'Updated 18 May 2024'], ['Insurance Readiness Report', 'Exposure · policy extraction · documentation gaps', 'Updated 18 May 2024'], ['Incident Intelligence Report', 'Evidence · origin signal · damage assessment', 'Draft · human verification'], ['Safety Compliance Report', 'Controls · owners · expiry reminders', 'Updated 16 May 2024'], ['Executive Risk Summary', 'Board-ready snapshot of facility exposure', 'Updated 18 May 2024']]; return <><PageHeading eyebrow="REPORTING / DECISION SUPPORT" title="Reports" subtitle="Generate structured intelligence for operations, insurers, risk engineers and leadership." actions={<button className="primary-button" onClick={() => onGenerate('Executive Risk Summary')}><Icon name="report" size={15} />Generate executive summary</button>} /><div className="report-callout"><div className="ai-mark"><Icon name="spark" size={18} /></div><div><span className="panel-eyebrow">AGENI REPORTING ENGINE</span><h2>One source of truth for risk conversations.</h2><p>Every report includes data quality, evidence traceability, verified financial exposure where available, critical gaps, recommended actions and a human verification section.</p></div></div><div className="report-grid">{reports.map(([title, detail, status]) => <article className="panel report-card" key={title}><div className="report-card-icon"><Icon name="report" size={18} /></div><div className="report-card-copy"><span className="panel-eyebrow">AGENI / REPORT</span><h2>{title}</h2><p>{detail}</p><span className="report-status">{generated === title ? 'Generating now…' : status}</span></div><button className="icon-button" title={`Generate ${title}`} onClick={() => onGenerate(title)}><Icon name="download" size={16} /></button></article>)}</div><div className="disclaimer-banner"><Icon name="info" size={16} /><div><strong>Human verification section included</strong><p>Generated reports are decision-support documents. AI-extracted information is not legal advice and should be verified against source records.</p></div></div></>;
+}
+
+function Assistant({ open, setOpen }) { const [input, setInput] = useState(''); const [messages, setMessages] = useState([{ role: 'assistant', text: 'I can help interpret verified facility data, risk factors, evidence gaps and inspection priorities.' }]); const send = () => { const query = input.trim(); if (!query) return; const lower = query.toLowerCase(); let answer = "I don't have enough verified data to determine that."; if (lower.includes('risk score') || lower.includes('risk high')) answer = 'The current score is 72/100, driven mainly by electrical load (81), combustible material (76) and machinery condition (68). Confidence is 72% with 86% data completeness.'; else if (lower.includes('hazard')) answer = 'The three highest assessed contributors are electrical load, combustible material concentration and machinery condition. Verify HT Panel 02 and Extrusion Line 04 first.'; else if (lower.includes('asset')) answer = 'Ageni does not have a verified asset register or asset valuation in this deployment. I can rank existing thermal detections by their separate insurance-risk indicator, but I cannot identify the highest-value asset.'; else if (lower.includes('missing') || lower.includes('documentation')) answer = 'Verified gaps include maintenance records, inventory reconciliation, a hydrant pump test certificate and the latest electrical inspection evidence.'; else if (lower.includes('inspect')) answer = 'Start with HT Panel 02, then Extrusion Line 04. Both have condition signals that need human verification.'; setMessages((prev) => [...prev, { role: 'user', text: query }, { role: 'assistant', text: answer }]); setInput(''); }; if (!open) return <button className="assistant-fab" onClick={() => setOpen(true)}><Icon name="spark" size={17} />Ask Ageni</button>; return <aside className="assistant-drawer"><div className="assistant-drawer-head"><div><span className="ai-mark small"><Icon name="spark" size={14} /></span><div><strong>Ageni assistant</strong><span>Grounded facility intelligence</span></div></div><button className="icon-button" onClick={() => setOpen(false)}><Icon name="close" size={16} /></button></div><div className="assistant-safe"><Icon name="shield" size={13} />No invented data · verified context only</div><div className="assistant-messages">{messages.map((message, index) => <div className={`assistant-message ${message.role}`} key={`${message.role}-${index}`}>{message.text}</div>)}</div><div className="assistant-suggestions">{['Why is our risk score high?', 'What is missing?', 'Which assets need inspection?'].map((suggestion) => <button key={suggestion} onClick={() => { setInput(suggestion); }}>{suggestion}</button>)}</div><div className="assistant-input"><input value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && send()} placeholder="Ask about this facility…" /><button onClick={send} aria-label="Send"><Icon name="arrow" size={15} /></button></div></aside>; }
+
+function IncidentModal({ onClose, onSubmit }) { const [fileName, setFileName] = useState(''); const handleSubmit = (event) => { event.preventDefault(); onSubmit(); }; return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><div className="modal" role="dialog" aria-modal="true" aria-labelledby="incident-title"><div className="modal-head"><div><span className="panel-eyebrow">PROTECTED RECORD / STEP 01</span><h2 id="incident-title">Report incident</h2><p>Capture known facts first. You can add evidence after saving.</p></div><button className="icon-button" onClick={onClose}><Icon name="close" size={17} /></button></div><form onSubmit={handleSubmit}><div className="form-grid"><label>Incident type<select defaultValue="Electrical anomaly"><option>Electrical anomaly</option><option>Thermal detection</option><option>Equipment damage</option><option>Other observation</option></select></label><label>Location<select defaultValue="Electrical Room"><option>Electrical Room</option><option>Production</option><option>Furnace</option><option>Storage</option><option>Chemical Area</option><option>Loading Area</option></select></label><label>Date and time<input type="datetime-local" defaultValue="2024-05-18T14:20" /></label><label>Reported by<input type="text" defaultValue="Risk Engineer" /></label><label className="full-field">Initial observation<textarea defaultValue="Elevated electrical load observed alongside a rising temperature trend. Site inspection required." /></label></div><div className="modal-upload"><Icon name="upload" size={18} /><div><strong>{fileName || 'Attach evidence now (optional)'}</strong><span>Photographs, videos, PDFs, invoices or maintenance records</span></div><label className="secondary-button">Choose files<input type="file" hidden multiple onChange={(event) => setFileName(event.target.files?.length ? `${event.target.files.length} file(s) selected` : '')} /></label></div><div className="modal-foot"><span><Icon name="shield" size={13} />Human verification required</span><div><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button type="submit" className="primary-button">Save incident <Icon name="arrow" size={14} /></button></div></div></form></div></div>; }
+
+function App() {
+  const [activePage, setActivePage] = useState('Dashboard');
+  const [points, setPoints] = useState([]);
+  const [stats, setStats] = useState(null);
+  const [zones, setZones] = useState(null);
+  const [plants, setPlants] = useState([]);
+  const [dataSource, setDataSource] = useState('DEMO DATA');
+  const [loading, setLoading] = useState(true);
+  const [lastRefreshed, setLastRefreshed] = useState(new Date());
+  const [error, setError] = useState('');
+  const [assistantOpen, setAssistantOpen] = useState(false);
+  const [incidentOpen, setIncidentOpen] = useState(false);
+  const [notice, setNotice] = useState('');
+  const [generatedReport, setGeneratedReport] = useState('');
+  const [selectedPoint, setSelectedPoint] = useState(null);
+
+  const loadData = useCallback(async () => {
+    setLoading(true);
+    setError('');
+    const results = await Promise.allSettled([
+      axios.get(`${API_BASE_URL}/thermal-points?hours=${THERMAL_WINDOW_HOURS}&limit=5000`),
+      axios.get(`${API_BASE_URL}/stats`),
+      axios.get(`${API_BASE_URL}/industrial-zones`),
+      axios.get(`${API_BASE_URL}/power-plants`),
+    ]);
+    const [pointResult, statsResult, zonesResult, plantsResult] = results;
+    let connected = false;
+    let livePointsAvailable = false;
+    if (pointResult.status === 'fulfilled' && Array.isArray(pointResult.value.data?.features)) { const liveFeatures = pointResult.value.data.features; setPoints(liveFeatures); livePointsAvailable = liveFeatures.length > 0; connected = true; }
+    if (statsResult.status === 'fulfilled' && statsResult.value.data && typeof statsResult.value.data === 'object' && !Array.isArray(statsResult.value.data) && 'total_thermal_points' in statsResult.value.data) { setStats(statsResult.value.data); connected = true; }
+    if (zonesResult.status === 'fulfilled' && zonesResult.value.data?.type === 'FeatureCollection') { setZones(zonesResult.value.data); connected = true; }
+    if (plantsResult.status === 'fulfilled' && Array.isArray(plantsResult.value.data?.features)) { setPlants(plantsResult.value.data.features); connected = true; }
+    setDataSource(connected && livePointsAvailable ? 'LIVE API' : 'DEMO DATA');
+    if (!connected) setError('Live facility API is unavailable. Ageni is showing clearly labelled demo data so the workflow remains available.');
+    setLastRefreshed(new Date());
+    setLoading(false);
   }, []);
 
-  return (
-    <div className="dashboard-container">
-      {/* Sidebar Controls & Analytics */}
-      <aside className="dashboard-sidebar">
-        {/* Header Branding */}
-        <div className="sidebar-header">
-          <div className="badge-row">
-            <span className="live-pill">
-              <span className="live-dot"></span> LIVE VIIRS FEED
-            </span>
-            <span className="sih-tag">SIH26162</span>
-          </div>
-          <h1 className="app-title">Thermal Intelligence & Industrial Fire Detection</h1>
-          <p className="app-subtitle">
-            Near-Real-Time NASA FIRMS Sentinel with PostGIS & ML Classifier
-          </p>
-        </div>
+  useEffect(() => { loadData(); }, [loadData]);
+  useEffect(() => { if (!notice) return undefined; const timer = setTimeout(() => setNotice(''), 3600); return () => clearTimeout(timer); }, [notice]);
 
-        {/* Global Stats Banner */}
-        <div className="stats-overview-card">
-          <div className="stat-item main-stat">
-            <span className="stat-label">Total Active Detections</span>
-            <span className="stat-value">
-              {loading
-                ? '...'
-                : (selectedHours === null
-                    ? (stats?.total_thermal_points ?? points.length)
-                    : points.length
-                  ).toLocaleString()}
-            </span>
-          </div>
-
-          <div className="stat-subrow">
-            <div className="stat-item">
-              <span className="stat-label">Visible on Map</span>
-              <span className="stat-subvalue">{loading ? '...' : filteredPoints.length}</span>
-            </div>
-            <div className="stat-item">
-              <span className="stat-label">Latest Ingestion</span>
-              <span className="stat-subvalue ingestion-time">
-                {stats?.most_recent_ingestion
-                  ? new Date(stats.most_recent_ingestion).toLocaleString(undefined, {
-                      month: 'short',
-                      day: 'numeric',
-                      hour: '2-digit',
-                      minute: '2-digit',
-                    })
-                  : 'N/A'}
-              </span>
-            </div>
-          </div>
-        </div>
-
-        {/* Time Window Filter */}
-        <div className="filter-section">
-          <label className="section-label">Time Window Filter</label>
-          <div className="time-button-group">
-            {[
-              { label: 'All Time', value: null },
-              { label: '24 Hours', value: 24 },
-              { label: '48 Hours', value: 48 },
-              { label: '5 Days', value: 120 },
-            ].map((opt) => (
-              <button
-                key={String(opt.value)}
-                className={`time-btn ${selectedHours === opt.value ? 'active' : ''}`}
-                onClick={() => setSelectedHours(opt.value)}
-              >
-                {opt.label}
-              </button>
-            ))}
-          </div>
-          <p className="filter-sample-note">
-            * "All Time" displays a sample (max 5,000 detections) when dataset is large.
-          </p>
-        </div>
-
-        {/* Map Reference Layers Toggle */}
-        <div className="layers-toggle-section">
-          <label className="section-label">Map Context Layers</label>
-          <div className="layer-toggles-card">
-            {/* Industrial Zones Toggle */}
-            <label className="layer-toggle-row">
-              <div className="layer-info">
-                <span className="layer-swatch industrial-swatch"></span>
-                <div className="layer-text">
-                  <span className="layer-name">Industrial Zones</span>
-                  <span className="layer-meta">
-                    {industrialZones?.features ? `${industrialZones.features.length} zones` : 'OSM Polygons'}
-                  </span>
-                </div>
-              </div>
-              <input
-                type="checkbox"
-                className="layer-checkbox"
-                checked={showIndustrialZones}
-                onChange={(e) => setShowIndustrialZones(e.target.checked)}
-              />
-            </label>
-
-            {/* Power Plants Toggle */}
-            <label className="layer-toggle-row">
-              <div className="layer-info">
-                <span className="layer-swatch powerplant-swatch"></span>
-                <div className="layer-text">
-                  <span className="layer-name">Power Plants</span>
-                  <span className="layer-meta">
-                    {powerPlants.length ? `${powerPlants.length} facilities` : 'WRI / IND DB'}
-                  </span>
-                </div>
-              </div>
-              <input
-                type="checkbox"
-                className="layer-checkbox"
-                checked={showPowerPlants}
-                onChange={(e) => setShowPowerPlants(e.target.checked)}
-              />
-            </label>
-          </div>
-        </div>
-
-        {/* Classification Breakdown Cards */}
-        <div className="categories-section">
-          <div className="section-header-row">
-            <label className="section-label">Classification Breakdown</label>
-            {activeCategoryFilter !== 'ALL' && (
-              <button
-                className="reset-filter-link"
-                onClick={() => setActiveCategoryFilter('ALL')}
-              >
-                Reset Filter
-              </button>
-            )}
-          </div>
-
-          <div className="category-cards-list">
-            {Object.entries(CLASSIFICATION_CONFIG).map(([catKey, config]) => {
-              const count = categoryCounts[catKey] || 0;
-              const percent = points.length ? Math.round((count / points.length) * 100) : 0;
-              const isActive = activeCategoryFilter === catKey;
-
-              return (
-                <div
-                  key={catKey}
-                  className={`category-card ${isActive ? 'selected' : ''}`}
-                  onClick={() =>
-                    setActiveCategoryFilter(isActive ? 'ALL' : catKey)
-                  }
-                  style={{
-                    borderColor: isActive ? config.color : undefined,
-                    backgroundColor: isActive ? config.bgLight : undefined,
-                  }}
-                >
-                  <div className="category-card-top">
-                    <div className="cat-title-wrap">
-                      <span
-                        className="cat-dot"
-                        style={{ backgroundColor: config.color }}
-                      ></span>
-                      <span className="cat-name">{config.label}</span>
-                    </div>
-                    <span
-                      className="cat-count"
-                      style={{ color: config.color }}
-                    >
-                      {count}
-                    </span>
-                  </div>
-
-                  <p className="cat-desc">{config.shortDesc}</p>
-
-                  <div className="cat-progress-track">
-                    <div
-                      className="cat-progress-bar"
-                      style={{
-                        width: `${percent}%`,
-                        backgroundColor: config.color,
-                      }}
-                    ></div>
-                  </div>
-                  <div className="cat-progress-meta">
-                    <span>{percent}% of detections</span>
-                    <span className="click-to-filter-hint">
-                      {isActive ? 'Active filter (click to clear)' : 'Click to filter'}
-                    </span>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* Selected Point Inspector */}
-        {selectedPoint && (
-          <div className="selected-point-inspector">
-            <div className="inspector-header">
-              <span className="inspector-title">Active Point Inspector</span>
-              <button
-                className="close-inspector-btn"
-                onClick={() => setSelectedPoint(null)}
-              >
-                ×
-              </button>
-            </div>
-            <div className="inspector-body">
-              <div className="inspector-row">
-                <span>Class:</span>
-                <strong
-                  style={{
-                    color: getCategoryColor(selectedPoint.classification),
-                  }}
-                >
-                  {selectedPoint.classification || 'Unclassified'}
-                </strong>
-              </div>
-              <div className="inspector-row">
-                <span>FRP (Power):</span>
-                <strong>{selectedPoint.frp ? `${selectedPoint.frp} MW` : 'N/A'}</strong>
-              </div>
-              <div className="inspector-row">
-                <span>Distance to Industrial:</span>
-                <strong>{formatDistanceKm(selectedPoint.dist_to_industrial_m)}</strong>
-              </div>
-              <div className="inspector-row">
-                <span>Distance to Power Plant:</span>
-                <strong>{formatDistanceKm(selectedPoint.dist_to_powerplant_m)}</strong>
-              </div>
-              <div className="inspector-row">
-                <span>Coordinates:</span>
-                <code>
-                  {selectedPoint.latitude?.toFixed(4)}, {selectedPoint.longitude?.toFixed(4)}
-                </code>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Sidebar Footer */}
-        <div className="sidebar-footer">
-          <button
-            className="refresh-btn"
-            onClick={handleManualRefresh}
-            disabled={loading}
-          >
-            {loading ? (
-              <span className="spinner"></span>
-            ) : (
-              <span className="refresh-icon">↻</span>
-            )}
-            {loading ? 'Refreshing Data...' : 'Refresh Thermal Feed'}
-          </button>
-          <span className="last-sync-text">
-            Synced: {lastRefreshed.toLocaleTimeString()}
-          </span>
-        </div>
-      </aside>
-
-      {/* Interactive Map Area */}
-      <main className="dashboard-map-area">
-        {error && (
-          <div className="error-banner">
-            <div className="error-content">
-              <strong>Connection Warning:</strong> {error}
-            </div>
-            <button className="error-retry-btn" onClick={handleManualRefresh}>
-              Retry Connection
-            </button>
-          </div>
-        )}
-
-        <MapContainer
-          center={[22.0, 79.0]}
-          zoom={5}
-          scrollWheelZoom={true}
-          className="leaflet-map-canvas"
-        >
-          <TileLayer
-            attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors | NASA FIRMS'
-            url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-          />
-
-          {/* 1. Industrial Zones Polygon Layer (Toggleable) */}
-          {showIndustrialZones && industrialZones && (
-            <GeoJSON
-              key={`industrial-zones-${industrialZones.features?.length || 0}`}
-              data={industrialZones}
-              style={() => ({
-                fillColor: '#8b5cf6',
-                fillOpacity: 0.2,
-                color: '#8b5cf6',
-                weight: 1.5,
-                opacity: 1,
-              })}
-              onEachFeature={onEachIndustrialZone}
-            />
-          )}
-
-          {/* 2. Power Plants Layer (Toggleable) */}
-          {showPowerPlants &&
-            powerPlants.map((plant, idx) => {
-              const lat = plant.properties?.latitude ?? plant.geometry?.coordinates?.[1];
-              const lng = plant.properties?.longitude ?? plant.geometry?.coordinates?.[0];
-
-              if (lat === undefined || lng === undefined || isNaN(lat) || isNaN(lng)) {
-                return null;
-              }
-
-              const props = plant.properties || {};
-
-              return (
-                <CircleMarker
-                  key={`plant-${props.id || idx}`}
-                  center={[lat, lng]}
-                  radius={4}
-                  pathOptions={{
-                    fillColor: '#eab308',
-                    fillOpacity: 0.9,
-                    color: '#ffffff',
-                    weight: 1.5,
-                  }}
-                >
-                  <Popup className="thermal-popup">
-                    <div className="popup-card">
-                      <div
-                        className="popup-header-tag"
-                        style={{ backgroundColor: '#eab308', color: '#1e293b' }}
-                      >
-                        ⚡ Power Plant
-                      </div>
-                      <div className="popup-content">
-                        <div
-                          style={{
-                            fontWeight: 700,
-                            fontSize: '0.95rem',
-                            marginBottom: '8px',
-                            color: '#ffffff',
-                          }}
-                        >
-                          {props.name || 'Unnamed Power Plant'}
-                        </div>
-                        <div className="popup-metric-grid">
-                          <div className="popup-metric">
-                            <span className="metric-title">Capacity (MW)</span>
-                            <span className="metric-data highlight">
-                              {props.capacity_mw !== undefined && props.capacity_mw !== null
-                                ? `${props.capacity_mw} MW`
-                                : 'N/A'}
-                            </span>
-                          </div>
-                          <div className="popup-metric">
-                            <span className="metric-title">Primary Fuel</span>
-                            <span
-                              className="metric-data"
-                              style={{ textTransform: 'capitalize' }}
-                            >
-                              {props.primary_fuel || 'N/A'}
-                            </span>
-                          </div>
-                        </div>
-                        <div className="popup-footer-row">
-                          <div className="popup-coords">
-                            📍 {lat.toFixed(4)}, {lng.toFixed(4)}
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  </Popup>
-                </CircleMarker>
-              );
-            })}
-
-          {/* 3. Clustered Thermal Point Markers Layer */}
-          <MarkerClusterGroup
-            chunkedLoading={true}
-            iconCreateFunction={createClusterCustomIcon}
-            maxClusterRadius={50}
-            spiderfyOnMaxZoom={true}
-            showCoverageOnHover={false}
-            zoomToBoundsOnClick={true}
-          >
-            {renderedMarkers}
-          </MarkerClusterGroup>
-        </MapContainer>
-
-        {/* Map Legend (Bottom-Left) */}
-        <div className="map-legend-overlay">
-          <div className="legend-header">
-            <span className="legend-title">Map Legend</span>
-            <span className="legend-count-pill">{filteredPoints.length} Detections</span>
-          </div>
-          <div className="legend-items">
-            {/* Thermal Classifications */}
-            {Object.entries(CLASSIFICATION_CONFIG).map(([catKey, config]) => (
-              <div key={catKey} className="legend-row">
-                <span
-                  className="legend-bullet"
-                  style={{ backgroundColor: config.color }}
-                ></span>
-                <span className="legend-label">{config.label}</span>
-              </div>
-            ))}
-
-            {/* Optional Layer Swatches when toggled */}
-            {showIndustrialZones && (
-              <div className="legend-row dynamic-legend-item">
-                <span className="legend-bullet-poly"></span>
-                <span className="legend-label">Industrial Zone (OSM)</span>
-              </div>
-            )}
-
-            {showPowerPlants && (
-              <div className="legend-row dynamic-legend-item">
-                <span className="legend-bullet-plant"></span>
-                <span className="legend-label">Power Plant (Facility)</span>
-              </div>
-            )}
-          </div>
-        </div>
-      </main>
-    </div>
-  );
+  const navigate = (page, options = {}) => { setActivePage(page); if (!options.keepSelection) setSelectedPoint(null); if (process.env.NODE_ENV !== 'test') { try { window.scrollTo({ top: 0, behavior: 'smooth' }); } catch { /* embedded shells may not implement scrolling. */ } } };
+  const pageProps = { navigate, stats, dataSource, lastRefreshed, points, zones, plants, selectedPoint, setSelectedPoint };
+  const renderPage = () => {
+    if (activePage === 'Dashboard') return <DashboardPage {...pageProps} />;
+    if (activePage === 'Risk Intelligence') return <RiskIntelligencePage {...pageProps} />;
+    if (activePage === 'Live Monitoring') return <LiveMonitoringPage {...pageProps} />;
+    if (activePage === 'Risk Map') return <RiskMapPage {...pageProps} />;
+    if (activePage === 'Insurance Intelligence') return <InsurancePage {...pageProps} />;
+    if (activePage === 'Incident Center') return <IncidentPage onReport={() => setIncidentOpen(true)} {...pageProps} />;
+    if (activePage === 'Claims Intelligence') return <ClaimsPage {...pageProps} />;
+    if (activePage === 'Assets') return <AssetsPage {...pageProps} />;
+    if (activePage === 'Safety & Compliance') return <CompliancePage {...pageProps} />;
+    return <ReportsPage onGenerate={(title) => { setGeneratedReport(title); setNotice(`${title} is being prepared with human verification notes.`); }} generated={generatedReport} {...pageProps} />;
+  };
+  return <div className="app-shell"><aside className="app-sidebar"><div className="brand"><div className="brand-mark">A<span /></div><div><strong>Ageni</strong><span>Industrial intelligence</span></div></div><div className="sidebar-mode"><span className="mode-dot" /><div><strong>Workspace online</strong><span>{dataSource === 'DEMO DATA' ? 'Demo data enabled' : 'Connected to facility API'}</span></div><button title="Refresh data" onClick={loadData} disabled={loading}><Icon name="refresh" size={14} /></button></div><nav className="main-nav" aria-label="Main navigation">{['Workspace', 'Readiness', 'Governance'].map((section) => <div className="nav-section" key={section}><span className="nav-section-label">{section}</span>{NAVIGATION.filter((item) => item.section === section).map((item) => <button key={item.label} className={`nav-item ${activePage === item.label ? 'active' : ''}`} onClick={() => navigate(item.label)}><Icon name={item.icon} size={17} /><span>{item.label}</span>{item.label === 'Incident Center' && <b>1</b>}</button>)}</div>)}</nav><div className="sidebar-bottom"><button className="help-link"><Icon name="help" size={16} />Help & terminology</button><div className="user-card"><div className="avatar">IN</div><div><strong>INNOVATEX</strong><span>Risk Engineer</span></div><Icon name="settings" size={15} /></div></div></aside><main className="main-area"><header className="topbar"><div className="breadcrumbs"><span>Ageni</span><Icon name="chevron" size={13} /><strong>{activePage}</strong></div><div className="topbar-actions"><div className="facility-select"><span className="facility-marker" /><div><small>ACTIVE FACILITY</small><strong>West Coast Campus</strong></div><Icon name="chevron" size={14} /></div><button className="topbar-icon" title="Search"><Icon name="search" size={17} /></button><button className="topbar-icon notification-icon" title="Notifications"><Icon name="bell" size={17} /><i>3</i></button><div className="topbar-avatar">IN</div></div></header><div className="page-content">{loading && activePage === 'Dashboard' && <div className="loading-strip"><span className="spinner" />Loading facility context…</div>}{error && <div className="connection-banner"><Icon name="info" size={15} /><span>{error}</span><button onClick={loadData}>Retry</button></div>}{renderPage()}</div></main><Assistant open={assistantOpen} setOpen={setAssistantOpen} />{incidentOpen && <IncidentModal onClose={() => setIncidentOpen(false)} onSubmit={() => { setIncidentOpen(false); setNotice('Incident INC-240518-08 saved. Add evidence when ready.'); }} />}{notice && <div className="toast"><Icon name="check" size={15} />{notice}</div>}</div>;
 }
 
 export default App;
